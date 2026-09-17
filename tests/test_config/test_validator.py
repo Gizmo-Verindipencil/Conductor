@@ -11,11 +11,15 @@ from conductor.config.schema import (
     ContextConfig,
     ForEachDef,
     GateOption,
+    HumanGateStepDef,
     InputDef,
     ParallelGroup,
     RouteDef,
+    ScriptStepDef,
+    TerminateStepDef,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.config.validator import (
     INPUT_REF_PATTERN,
@@ -156,9 +160,8 @@ class TestHumanGateValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="test", entry_point="gate1"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate1",
-                    type="human_gate",
                     prompt="Choose:",
                     options=[
                         GateOption(label="Yes", value="yes", route="agent2"),
@@ -181,9 +184,8 @@ class TestHumanGateValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="test", entry_point="gate1"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate1",
-                    type="human_gate",
                     prompt="Choose:",
                     options=[
                         GateOption(label="Yes", value="yes", route="nonexistent"),
@@ -613,9 +615,8 @@ class TestOutputPathCoverage:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="test", entry_point="gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Choose:",
                     options=[
                         GateOption(label="Approve", value="yes", route="agent_a"),
@@ -975,9 +976,8 @@ class TestTemplateReferenceValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="t", entry_point="step"),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step",
-                    type="script",
                     command="echo",
                     args=["{{ ghost.output.value }}"],
                     routes=[RouteDef(to="$end")],
@@ -991,9 +991,8 @@ class TestTemplateReferenceValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="t", entry_point="step"),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step",
-                    type="script",
                     command="run-{{ ghost.output }}",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1006,9 +1005,8 @@ class TestTemplateReferenceValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="t", entry_point="step"),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step",
-                    type="script",
                     command="echo",
                     working_dir="/tmp/{{ ghost.output }}",
                     routes=[RouteDef(to="$end")],
@@ -1217,9 +1215,8 @@ class TestExplicitModeWarnings:
                 input={"topic": InputDef(type="string")},
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step",
-                    type="script",
                     command="echo",
                     args=["{{ workflow.input.topic }}"],
                     routes=[RouteDef(to="$end")],
@@ -1246,9 +1243,8 @@ class TestExplicitModeWarnings:
             ),
             agents=[
                 _agent_with_prompt("producer", "make it", routes=[RouteDef(to="consumer")]),
-                AgentDef(
+                ScriptStepDef(
                     name="consumer",
-                    type="script",
                     command="echo",
                     args=["{{ producer.output.text }}"],
                     # Notably absent: input=["producer.output"]
@@ -1274,9 +1270,8 @@ class TestExplicitModeWarnings:
                 input={"topic": InputDef(type="string")},
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step",
-                    type="script",
                     command="echo",
                     args=["{{ workflow.input.topic }}"],
                     routes=[RouteDef(to="$end")],
@@ -1304,9 +1299,8 @@ class TestExplicitModeWarnings:
             ),
             agents=[
                 _agent_with_prompt("producer", "make it", routes=[RouteDef(to="child")]),
-                AgentDef(
+                WorkflowStepDef(
                     name="child",
-                    type="workflow",
                     workflow="./child.yaml",
                     input_mapping={"data": "{{ producer.output.value }}"},
                     # Notably absent: input=["producer.output"]
@@ -1327,9 +1321,8 @@ class TestExplicitModeWarnings:
                 input={"topic": InputDef(type="string")},
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="child",
-                    type="workflow",
                     workflow="./child.yaml",
                     input_mapping={"data": "{{ workflow.input.topic }}"},
                     routes=[RouteDef(to="$end")],
@@ -1359,9 +1352,8 @@ class TestExplicitModeWarnings:
             ),
             agents=[
                 _agent_with_prompt("producer", "make it", routes=[RouteDef(to="gate")]),
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt=(
                         "Topic: {{ workflow.input.topic }}. "
                         "Producer said: {{ producer.output.text }}. Continue?"
@@ -1643,9 +1635,8 @@ class TestExplicitModeFieldPrecision:
             ),
             agents=[
                 _agent_with_prompt("producer", "make it", routes=[RouteDef(to="child")]),
-                AgentDef(
+                WorkflowStepDef(
                     name="child",
-                    type="workflow",
                     workflow="./child.yaml",
                     input_mapping={"data": "{{ producer.output.bar }}"},
                     input=["producer.output.foo"],
@@ -2025,9 +2016,8 @@ class TestSubWorkflowRefValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow=workflow_ref,
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2232,9 +2222,8 @@ class TestSubWorkflowRefValidation:
                     type="for_each",
                     source="loader.output.items",
                     **{"as": "item"},
-                    agent=AgentDef(
+                    agent=WorkflowStepDef(
                         name="worker",
-                        type="workflow",
                         workflow="missing@team-a#v1.0.0",
                         routes=[RouteDef(to="$end")],
                     ),
@@ -2331,9 +2320,8 @@ class TestSubWorkflowRefValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="./a.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2427,9 +2415,8 @@ class TestSubWorkflowRefValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="A.yaml",  # same file as a.yaml on case-insensitive FS
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2513,9 +2500,8 @@ class TestSubWorkflowRefValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="./a0.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2769,9 +2755,8 @@ class TestTerminateValidation:
                     prompt="check",
                     routes=[RouteDef(to="abort"), RouteDef(to="$end")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="abort",
-                    type="terminate",
                     status="failed",
                     reason="nope",
                 ),
@@ -2784,9 +2769,8 @@ class TestTerminateValidation:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="t", entry_point="goodbye"),
             agents=[
-                AgentDef(
+                TerminateStepDef(
                     name="goodbye",
-                    type="terminate",
                     status="success",
                     reason="nothing to do",
                 ),
@@ -2802,9 +2786,8 @@ class TestTerminateValidation:
             workflow=WorkflowDef(name="t", entry_point="group"),
             agents=[
                 AgentDef(name="a", model="gpt-4", prompt="x"),
-                AgentDef(
+                TerminateStepDef(
                     name="b",
-                    type="terminate",
                     status="failed",
                     reason="nope",
                 ),
@@ -2825,9 +2808,8 @@ class TestTerminateValidation:
                 "type": "for_each",
                 "source": "workflow.input.items",
                 "as": "item",
-                "agent": AgentDef(
+                "agent": TerminateStepDef(
                     name="bail",
-                    type="terminate",
                     status="failed",
                     reason="r",
                 ),
@@ -2869,9 +2851,8 @@ class TestTerminateValidation:
                     prompt="x",
                     routes=[RouteDef(to="bail"), RouteDef(to="writer")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="bail",
-                    type="terminate",
                     status="failed",
                     reason="nope",
                     output_template={"result": "aborted"},
@@ -2892,6 +2873,43 @@ class TestTerminateValidation:
             f"unexpected coverage warning: {warnings!r}"
         )
 
+    def test_empty_output_template_still_counts_as_override(self) -> None:
+        """An explicit ``output_template: {}`` is an override, not a fallback.
+
+        The override check must distinguish ``None`` from an empty mapping:
+        the engine renders ``{}`` as the final output for that path, so the
+        workflow-level ``output:`` is never consulted and no coverage warning
+        may fire for steps only reachable on other paths.
+        """
+        config = WorkflowConfig(
+            workflow=WorkflowDef(name="t", entry_point="check"),
+            agents=[
+                AgentDef(
+                    name="check",
+                    model="gpt-4",
+                    prompt="x",
+                    routes=[RouteDef(to="bail"), RouteDef(to="writer")],
+                ),
+                TerminateStepDef(
+                    name="bail",
+                    status="failed",
+                    reason="nope",
+                    output_template={},
+                ),
+                AgentDef(
+                    name="writer",
+                    model="gpt-4",
+                    prompt="x",
+                    routes=[RouteDef(to="$end")],
+                ),
+            ],
+            output={"result": "{{ writer.output.result }}"},
+        )
+        warnings = validate_workflow_config(config)
+        assert not any("writer" in w and "not run on all paths" in w for w in warnings), (
+            f"unexpected coverage warning: {warnings!r}"
+        )
+
     def test_output_template_with_fallback_still_warns(self) -> None:
         """A terminate path WITHOUT `output_template` falls back to workflow.output —
         it should be analyzed for coverage like any normal terminal path."""
@@ -2904,9 +2922,8 @@ class TestTerminateValidation:
                     prompt="x",
                     routes=[RouteDef(to="bail"), RouteDef(to="writer")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="bail",
-                    type="terminate",
                     status="failed",
                     reason="nope",
                 ),
@@ -2935,9 +2952,8 @@ class TestTerminateValidation:
                     prompt="x",
                     routes=[RouteDef(to="bail"), RouteDef(to="$end")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="bail",
-                    type="terminate",
                     status="failed",
                     reason="{{ ghost.output.value }}",
                 ),
@@ -2957,9 +2973,8 @@ class TestTerminateValidation:
                     prompt="x",
                     routes=[RouteDef(to="bail"), RouteDef(to="$end")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="bail",
-                    type="terminate",
                     status="failed",
                     reason="halt",
                     output_template={"r": "{{ ghost.output.value }}"},

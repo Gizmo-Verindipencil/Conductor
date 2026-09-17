@@ -22,7 +22,7 @@ from conductor.gates.human import GateChoice, GatePrompt
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from conductor.config.schema import AgentDef, QuestionDef
+    from conductor.config.schema import QuestionDef, QuestionsStepDef
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ class NavFlags:
     abort: bool = False
 
     @classmethod
-    def resolve(cls, agent: AgentDef) -> NavFlags:
+    def resolve(cls, agent: QuestionsStepDef) -> NavFlags:
         """Apply defaults to a node's declared navigation flags.
 
         Args:
@@ -286,7 +286,7 @@ def resolve_questions(
 
 
 def build_prompt(
-    agent: AgentDef,
+    agent: QuestionsStepDef,
     question: ResolvedQuestion,
     *,
     nav: NavFlags,
@@ -366,7 +366,7 @@ def build_prompt(
 
 
 def build_review_prompt(
-    agent: AgentDef,
+    agent: QuestionsStepDef,
     records: dict[str, AnswerRecord],
     order: list[ResolvedQuestion],
     *,

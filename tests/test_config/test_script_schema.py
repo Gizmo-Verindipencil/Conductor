@@ -11,17 +11,19 @@ Tests cover:
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from conductor.config.schema import (
     AgentDef,
     ForEachDef,
     GateOption,
+    HumanGateStepDef,
     LimitsConfig,
     OutputField,
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -29,12 +31,36 @@ from conductor.config.validator import validate_workflow_config
 from conductor.exceptions import ConfigurationError
 
 
+def _assert_extra_forbidden(model_cls: type[BaseModel], payload: dict, field: str) -> None:
+    """Assert that ``field`` is rejected as an extra (foreign) field on ``model_cls``.
+
+    Step variants declare ``extra="forbid"``, so a field owned by another variant
+    fails with Pydantic's standard ``extra_forbidden`` error at ``field``'s location.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        model_cls.model_validate(payload)
+    assert any(
+        error["loc"] == (field,) and error["type"] == "extra_forbidden"
+        for error in exc_info.value.errors()
+    )
+
+
+def _assert_timeout_not_positive(timeout: int) -> None:
+    """Assert that a non-positive ``timeout`` fails the schema's ``gt=0`` bound."""
+    with pytest.raises(ValidationError) as exc_info:
+        ScriptStepDef(name="bad", command="echo", timeout=timeout)
+    assert any(
+        error["loc"] == ("timeout",) and error["type"] == "greater_than"
+        for error in exc_info.value.errors()
+    )
+
+
 class TestScriptAgentDef:
     """Tests for script type AgentDef validation."""
 
     def test_valid_script_agent(self) -> None:
         """Test creating a valid script agent."""
-        agent = AgentDef(name="run_tests", type="script", command="pytest")
+        agent = ScriptStepDef(name="run_tests", command="pytest")
         assert agent.type == "script"
         assert agent.command == "pytest"
         assert agent.args == []
@@ -44,9 +70,8 @@ class TestScriptAgentDef:
 
     def test_valid_script_agent_with_all_fields(self) -> None:
         """Test creating a script agent with all optional fields."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="build",
-            type="script",
             command="make",
             args=["build", "--verbose"],
             env={"CI": "true"},
@@ -61,9 +86,8 @@ class TestScriptAgentDef:
 
     def test_script_agent_with_routes(self) -> None:
         """Test script agent with routes validates correctly."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="check",
-            type="script",
             command="echo",
             args=["hello"],
             routes=[
@@ -76,32 +100,44 @@ class TestScriptAgentDef:
     def test_script_without_command_raises(self) -> None:
         """Test that script agent without command raises ValidationError."""
         with pytest.raises(ValidationError, match="script agents require 'command'"):
-            AgentDef(name="bad", type="script")
+            ScriptStepDef(name="bad")
 
     def test_script_with_empty_command_raises(self) -> None:
         """Test that script agent with empty command raises ValidationError."""
         with pytest.raises(ValidationError, match="script agents require 'command'"):
-            AgentDef(name="bad", type="script", command="")
+            ScriptStepDef(name="bad", command="")
 
     def test_script_with_prompt_raises(self) -> None:
-        """Test that script agent with prompt raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'prompt'"):
-            AgentDef(name="bad", type="script", command="echo", prompt="hello")
+        """Test that script agent with prompt raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {"name": "bad", "command": "echo", "prompt": "hello"},
+            "prompt",
+        )
 
     def test_script_with_provider_raises(self) -> None:
-        """Test that script agent with provider raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'provider'"):
-            AgentDef(name="bad", type="script", command="echo", provider="copilot")
+        """Test that script agent with provider raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {"name": "bad", "command": "echo", "provider": "copilot"},
+            "provider",
+        )
 
     def test_script_with_model_raises(self) -> None:
-        """Test that script agent with model raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'model'"):
-            AgentDef(name="bad", type="script", command="echo", model="gpt-4")
+        """Test that script agent with model raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {"name": "bad", "command": "echo", "model": "gpt-4"},
+            "model",
+        )
 
     def test_script_with_tools_raises(self) -> None:
-        """Test that script agent with tools raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'tools'"):
-            AgentDef(name="bad", type="script", command="echo", tools=["web_search"])
+        """Test that script agent with tools raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {"name": "bad", "command": "echo", "tools": ["web_search"]},
+            "tools",
+        )
 
     def test_script_with_output_accepted(self) -> None:
         """Script agents may declare an `output:` schema at config time (issue #118).
@@ -110,9 +146,8 @@ class TestScriptAgentDef:
         of the JSON stdout against the schema is exercised in
         ``tests/test_engine/test_script_workflow.py::TestScriptOutputSchema``.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="detector",
-            type="script",
             command="python",
             args=["-c", "import json; print(json.dumps({'route': 'planning'}))"],
             output={
@@ -132,9 +167,8 @@ class TestScriptAgentDef:
         is exercised in
         ``test_engine/test_script_workflow.py::test_empty_schema_requires_json_object``.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="probe",
-            type="script",
             command="echo",
             args=["{}"],
             output={},
@@ -142,29 +176,32 @@ class TestScriptAgentDef:
         assert agent.output == {}
 
     def test_script_with_system_prompt_raises(self) -> None:
-        """Test that script agent with system_prompt raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'system_prompt'"):
-            AgentDef(name="bad", type="script", command="echo", system_prompt="You are...")
+        """Test that script agent with system_prompt raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {"name": "bad", "command": "echo", "system_prompt": "You are..."},
+            "system_prompt",
+        )
 
     def test_script_with_options_raises(self) -> None:
-        """Test that script agent with options raises ValidationError."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'options'"):
-            AgentDef(
-                name="bad",
-                type="script",
-                command="echo",
-                options=[GateOption(label="OK", value="ok", route="$end")],
-            )
+        """Test that script agent with options raises ValidationError (extra_forbidden)."""
+        _assert_extra_forbidden(
+            ScriptStepDef,
+            {
+                "name": "bad",
+                "command": "echo",
+                "options": [GateOption(label="OK", value="ok", route="$end")],
+            },
+            "options",
+        )
 
     def test_timeout_rejects_zero(self) -> None:
-        """Test that timeout=0 raises ValidationError."""
-        with pytest.raises(ValidationError, match="timeout must be a positive integer"):
-            AgentDef(name="bad", type="script", command="echo", timeout=0)
+        """Test that timeout=0 raises ValidationError (fails the gt=0 bound)."""
+        _assert_timeout_not_positive(0)
 
     def test_timeout_rejects_negative(self) -> None:
-        """Test that negative timeout raises ValidationError."""
-        with pytest.raises(ValidationError, match="timeout must be a positive integer"):
-            AgentDef(name="bad", type="script", command="echo", timeout=-5)
+        """Test that negative timeout raises ValidationError (fails the gt=0 bound)."""
+        _assert_timeout_not_positive(-5)
 
 
 class TestScriptBackwardCompatibility:
@@ -173,8 +210,8 @@ class TestScriptBackwardCompatibility:
     def test_regular_agent_still_works(self) -> None:
         """Test that a regular agent definition is unaffected."""
         agent = AgentDef(name="test", prompt="hello")
-        assert agent.type is None
-        assert agent.command is None
+        assert agent.type == "agent"
+        assert agent.prompt == "hello"
 
     def test_explicit_agent_type_still_works(self) -> None:
         """Test that explicit type='agent' still works."""
@@ -183,9 +220,8 @@ class TestScriptBackwardCompatibility:
 
     def test_human_gate_still_works(self) -> None:
         """Test that human_gate type is unaffected."""
-        agent = AgentDef(
+        agent = HumanGateStepDef(
             name="gate",
-            type="human_gate",
             prompt="Choose:",
             options=[GateOption(label="Yes", value="yes", route="$end")],
         )
@@ -206,7 +242,7 @@ class TestScriptInParallelGroup:
             ),
             agents=[
                 AgentDef(name="agent_a", prompt="do something"),
-                AgentDef(name="script_b", type="script", command="echo"),
+                ScriptStepDef(name="script_b", command="echo"),
             ],
             parallel=[
                 ParallelGroup(
@@ -240,9 +276,8 @@ class TestScriptInForEach:
                     type="for_each",
                     source="setup.output.items",
                     **{"as": "item"},
-                    agent=AgentDef(
+                    agent=ScriptStepDef(
                         name="runner",
-                        type="script",
                         command="echo",
                     ),
                 ),
@@ -265,9 +300,8 @@ class TestScriptWorkflowConfig:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="setup",
-                    type="script",
                     command="echo",
                     args=["hello"],
                     routes=[RouteDef(to="$end")],
@@ -288,9 +322,8 @@ class TestScriptWorkflowConfig:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="checker",
-                    type="script",
                     command="test",
                     args=["-f", "output.txt"],
                     routes=[

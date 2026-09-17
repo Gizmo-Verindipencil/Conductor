@@ -24,6 +24,7 @@ from conductor.config.schema import (
     RuntimeConfig,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.engine.limits import LimitEnforcer
 from conductor.engine.workflow import WorkflowEngine
@@ -477,9 +478,8 @@ def _make_subworkflow_parent_config(
             ),
         ),
         agents=[
-            AgentDef(
+            WorkflowStepDef(
                 name="delegate",
-                type="workflow",
                 workflow="child.yaml",
                 routes=[RouteDef(to="$end")],
             ),

@@ -228,6 +228,7 @@ def _list_enabled_plugins(config, workflow_path: Path, sources) -> None:  # noqa
     different builds, so they are reported — and their component counts
     computed — separately rather than one silently standing in for both.
     """
+    from conductor.config.schema import AgentDef, StepDef
     from conductor.plugins.errors import PluginError
     from conductor.plugins.manifest import PluginFlavor
     from conductor.plugins.registry import resolve_plugins
@@ -246,8 +247,8 @@ def _list_enabled_plugins(config, workflow_path: Path, sources) -> None:  # noqa
     groups: dict[tuple[tuple[tuple[str, bool, bool, bool], ...], PluginFlavor | None], list[str]]
     groups = {}
 
-    def _record(name: str, agent) -> None:  # noqa: ANN001
-        if agent.type not in (None, "agent"):
+    def _record(name: str, agent: StepDef) -> None:
+        if not isinstance(agent, AgentDef):
             return
         entries = agent.plugins if agent.plugins is not None else config.workflow.runtime.plugins
         if not entries:

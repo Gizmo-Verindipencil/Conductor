@@ -15,7 +15,7 @@ import datetime as _dt
 
 import pytest
 
-from conductor.config.schema import AgentDef
+from conductor.config.schema import SetStepDef
 from conductor.exceptions import ExecutionError, TemplateError
 from conductor.executor.set_step import (
     SET_VALUE_REPR_MAX,
@@ -35,67 +35,66 @@ class TestSetExecutorSingleValue:
     """Single ``value:`` step coverage."""
 
     def test_string_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ a }}/{{ b }}")
+        agent = SetStepDef(name="x", value="{{ a }}/{{ b }}")
         out = executor.execute(agent, {"a": "myorg", "b": "myrepo"})
         assert out.value == "myorg/myrepo"
         assert out.is_multi is False
         assert out.output_type == "auto"
 
     def test_integer_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ n + 1 }}")
+        agent = SetStepDef(name="x", value="{{ n + 1 }}")
         out = executor.execute(agent, {"n": 41})
         assert out.value == 42
         assert isinstance(out.value, int)
 
     def test_float_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ 3.14 }}")
+        agent = SetStepDef(name="x", value="{{ 3.14 }}")
         out = executor.execute(agent, {})
         assert out.value == 3.14
 
     def test_boolean_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(
+        agent = SetStepDef(
             name="x",
-            type="set",
             value="{{ severity in ['high', 'critical'] }}",
         )
         out = executor.execute(agent, {"severity": "high"})
         assert out.value is True
 
     def test_list_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ [1, 2, 3] }}")
+        agent = SetStepDef(name="x", value="{{ [1, 2, 3] }}")
         out = executor.execute(agent, {})
         assert out.value == [1, 2, 3]
 
     def test_dict_auto(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ {'a': 1} }}")
+        agent = SetStepDef(name="x", value="{{ {'a': 1} }}")
         out = executor.execute(agent, {})
         assert out.value == {"a": 1}
 
     def test_empty_string_becomes_empty_string_not_none(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="")
+        agent = SetStepDef(name="x", value="")
         out = executor.execute(agent, {})
         assert out.value == ""
 
     def test_whitespace_only_becomes_empty_string(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="   \n  ")
+        agent = SetStepDef(name="x", value="   \n  ")
         out = executor.execute(agent, {})
         assert out.value == ""
 
     def test_explicit_null_keyword_returns_none(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="null")
+        agent = SetStepDef(name="x", value="null")
         out = executor.execute(agent, {})
         assert out.value is None
 
     def test_empty_render_via_template_returns_empty_string(self, executor: SetExecutor) -> None:
         """Template rendering to empty hits the not-stripped short-circuit."""
-        agent = AgentDef(name="x", type="set", value="{{ '' }}")
+        agent = SetStepDef(name="x", value="{{ '' }}")
         out = executor.execute(agent, {})
         assert out.value == ""
 
     def test_date_like_render_normalised_to_iso(self, executor: SetExecutor) -> None:
         """End-to-end auto detection: YAML date → ISO 8601 string after
         ``_to_json_safe`` runs."""
-        agent = AgentDef(name="x", type="set", value="2024-01-02")
+        agent = SetStepDef(name="x", value="2024-01-02")
         out = executor.execute(agent, {})
         assert out.value == "2024-01-02"
         assert isinstance(out.value, str)
@@ -105,9 +104,8 @@ class TestSetExecutorMultiValues:
     """Multi ``values:`` step coverage."""
 
     def test_multi_binds_each_key(self, executor: SetExecutor) -> None:
-        agent = AgentDef(
+        agent = SetStepDef(
             name="d",
-            type="set",
             values={
                 "is_breaking": "{{ severity in ['high', 'critical'] }}",
                 "target_branch": "{{ branch or 'main' }}",
@@ -127,9 +125,8 @@ class TestSetExecutorMultiValues:
         bindings within the same step. The second binding reads ``a`` from the
         *original* context (not the rendered ``first`` produced earlier in the
         same step)."""
-        agent = AgentDef(
+        agent = SetStepDef(
             name="d",
-            type="set",
             values={
                 "first": "{{ a }}-modified",
                 "second": "{{ a }}",
@@ -142,9 +139,8 @@ class TestSetExecutorMultiValues:
 
     def test_date_like_render_in_multi_normalised_to_iso(self, executor: SetExecutor) -> None:
         """Per-binding ``_to_json_safe`` also runs for multi-values steps."""
-        agent = AgentDef(
+        agent = SetStepDef(
             name="x",
-            type="set",
             values={"d": "2024-01-02", "t": "12:30:45"},
         )
         out = executor.execute(agent, {})
@@ -157,33 +153,33 @@ class TestSetExecutorExplicitOutputType:
     """Explicit ``output_type:`` overrides on single ``value:`` only."""
 
     def test_string_keeps_raw(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="1.2.3", output_type="string")
+        agent = SetStepDef(name="x", value="1.2.3", output_type="string")
         out = executor.execute(agent, {})
         assert out.value == "1.2.3"
         assert isinstance(out.value, str)
 
     def test_integer_success(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="42", output_type="integer")
+        agent = SetStepDef(name="x", value="42", output_type="integer")
         out = executor.execute(agent, {})
         assert out.value == 42
 
     def test_integer_failure(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="not-a-number", output_type="integer")
+        agent = SetStepDef(name="x", value="not-a-number", output_type="integer")
         with pytest.raises(ExecutionError, match="to integer"):
             executor.execute(agent, {})
 
     def test_number_int(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="42", output_type="number")
+        agent = SetStepDef(name="x", value="42", output_type="number")
         out = executor.execute(agent, {})
         assert out.value == 42
 
     def test_number_float(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="3.14", output_type="number")
+        agent = SetStepDef(name="x", value="3.14", output_type="number")
         out = executor.execute(agent, {})
         assert out.value == 3.14
 
     def test_number_failure(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="not-a-number", output_type="number")
+        agent = SetStepDef(name="x", value="not-a-number", output_type="number")
         with pytest.raises(ExecutionError, match="to number"):
             executor.execute(agent, {})
 
@@ -206,32 +202,32 @@ class TestSetExecutorExplicitOutputType:
         ],
     )
     def test_boolean_success(self, executor: SetExecutor, text: str, expected: bool) -> None:
-        agent = AgentDef(name="x", type="set", value=text, output_type="boolean")
+        agent = SetStepDef(name="x", value=text, output_type="boolean")
         out = executor.execute(agent, {})
         assert out.value is expected
 
     def test_boolean_failure(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="maybe", output_type="boolean")
+        agent = SetStepDef(name="x", value="maybe", output_type="boolean")
         with pytest.raises(ExecutionError, match="to boolean"):
             executor.execute(agent, {})
 
     def test_list_success(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="[1, 2, 3]", output_type="list")
+        agent = SetStepDef(name="x", value="[1, 2, 3]", output_type="list")
         out = executor.execute(agent, {})
         assert out.value == [1, 2, 3]
 
     def test_list_failure_on_dict(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{a: 1}", output_type="list")
+        agent = SetStepDef(name="x", value="{a: 1}", output_type="list")
         with pytest.raises(ExecutionError, match="output_type: list"):
             executor.execute(agent, {})
 
     def test_dict_success(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{a: 1, b: 2}", output_type="dict")
+        agent = SetStepDef(name="x", value="{a: 1, b: 2}", output_type="dict")
         out = executor.execute(agent, {})
         assert out.value == {"a": 1, "b": 2}
 
     def test_dict_failure_on_scalar(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="42", output_type="dict")
+        agent = SetStepDef(name="x", value="42", output_type="dict")
         with pytest.raises(ExecutionError, match="output_type: dict"):
             executor.execute(agent, {})
 
@@ -240,12 +236,12 @@ class TestSetExecutorTemplateErrors:
     """Template rendering failures propagate as TemplateError."""
 
     def test_undefined_variable_raises(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", value="{{ does_not_exist }}")
+        agent = SetStepDef(name="x", value="{{ does_not_exist }}")
         with pytest.raises(TemplateError):
             executor.execute(agent, {})
 
     def test_undefined_in_multi_raises(self, executor: SetExecutor) -> None:
-        agent = AgentDef(name="x", type="set", values={"a": "{{ ok }}", "b": "{{ missing }}"})
+        agent = SetStepDef(name="x", values={"a": "{{ ok }}", "b": "{{ missing }}"})
         with pytest.raises(TemplateError):
             executor.execute(agent, {"ok": "hi"})
 

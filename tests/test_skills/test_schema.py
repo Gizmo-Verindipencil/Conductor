@@ -7,10 +7,24 @@ from pydantic import ValidationError
 
 from conductor.config.schema import (
     AgentDef,
-    GateOption,
+    HumanGateStepDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
     SkillDiscoveryConfig,
+    TerminateStepDef,
+    WaitStepDef,
+    WorkflowStepDef,
 )
+
+
+def _assert_extra_forbidden(exc_info: pytest.ExceptionInfo[ValidationError], field: str) -> None:
+    """Since issue #517 a sibling-variant field is rejected by the concrete
+    step model's ``extra="forbid"``, not by a custom message — so assert the
+    standard ``extra_forbidden`` error structurally."""
+    assert any(
+        e["loc"] == (field,) and e["type"] == "extra_forbidden" for e in exc_info.value.errors()
+    )
 
 
 class TestAgentDefSkills:
@@ -35,45 +49,59 @@ class TestAgentDefSkills:
             AgentDef(name="a", model="gpt-4", prompt="Hello", skills=[""])
 
     def test_forbidden_on_script_agent(self) -> None:
-        with pytest.raises(ValidationError, match="script agents cannot have 'skills'"):
-            AgentDef(name="s", type="script", command="echo hi", skills=["conductor"])
+        # Issue #517: sibling-variant fields are rejected by extra="forbid",
+        # not by a custom "<type> agents cannot have 'skills'" message.
+        with pytest.raises(ValidationError) as exc_info:
+            ScriptStepDef.model_validate(
+                {"name": "s", "command": "echo hi", "skills": ["conductor"]}
+            )
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_forbidden_on_workflow_agent(self) -> None:
-        with pytest.raises(ValidationError, match="workflow agents cannot have 'skills'"):
-            AgentDef(name="w", type="workflow", workflow="sub.yaml", skills=["conductor"])
+        with pytest.raises(ValidationError) as exc_info:
+            WorkflowStepDef.model_validate(
+                {"name": "w", "workflow": "sub.yaml", "skills": ["conductor"]}
+            )
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_forbidden_on_human_gate(self) -> None:
-        with pytest.raises(ValidationError, match="human_gate agents cannot have 'skills'"):
-            AgentDef(
-                name="g",
-                type="human_gate",
-                prompt="Choose:",
-                options=[GateOption(label="Yes", value="y", route="next")],
-                skills=["conductor"],
+        with pytest.raises(ValidationError) as exc_info:
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "g",
+                    "prompt": "Choose:",
+                    "options": [{"label": "Yes", "value": "y", "route": "next"}],
+                    "skills": ["conductor"],
+                }
             )
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_forbidden_on_wait_agent(self) -> None:
-        with pytest.raises(ValidationError, match="wait agents cannot have 'skills'"):
-            AgentDef(name="w", type="wait", duration="1s", skills=["conductor"])
+        with pytest.raises(ValidationError) as exc_info:
+            WaitStepDef.model_validate({"name": "w", "duration": "1s", "skills": ["conductor"]})
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_forbidden_on_set_agent(self) -> None:
-        with pytest.raises(ValidationError, match="set agents cannot have 'skills'"):
-            AgentDef(name="s", type="set", value="hello", skills=["conductor"])
+        with pytest.raises(ValidationError) as exc_info:
+            SetStepDef.model_validate({"name": "s", "value": "hello", "skills": ["conductor"]})
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_forbidden_on_terminate_agent(self) -> None:
-        with pytest.raises(ValidationError, match="terminate agents cannot have 'skills'"):
-            AgentDef(
-                name="t",
-                type="terminate",
-                status="success",
-                reason="done",
-                skills=["conductor"],
+        with pytest.raises(ValidationError) as exc_info:
+            TerminateStepDef.model_validate(
+                {
+                    "name": "t",
+                    "status": "success",
+                    "reason": "done",
+                    "skills": ["conductor"],
+                }
             )
+        _assert_extra_forbidden(exc_info, "skills")
 
     def test_allowed_on_default_type_agent(self) -> None:
         agent = AgentDef(name="r", model="gpt-4", prompt="p", skills=["conductor"])
         assert agent.skills == ["conductor"]
-        assert agent.type is None
+        assert agent.type == "agent"
 
     def test_allowed_on_explicit_agent_type(self) -> None:
         agent = AgentDef(name="r", type="agent", model="gpt-4", prompt="p", skills=["conductor"])
@@ -134,8 +162,11 @@ class TestPathEntriesAtSchemaLevel:
             AgentDef(name="r", prompt="p", skills=["   "])
 
     def test_path_entries_still_forbidden_on_non_provider_steps(self) -> None:
-        with pytest.raises(ValidationError, match="cannot have 'skills'"):
-            AgentDef(name="s", type="script", command="echo hi", skills=["./a/b"])
+        # A path entry is still a skills entry: it cannot reach a script step
+        # either, and #517 routes that through extra="forbid".
+        with pytest.raises(ValidationError) as exc_info:
+            ScriptStepDef.model_validate({"name": "s", "command": "echo hi", "skills": ["./a/b"]})
+        _assert_extra_forbidden(exc_info, "skills")
 
 
 class TestSkillDiscoveryConfig:

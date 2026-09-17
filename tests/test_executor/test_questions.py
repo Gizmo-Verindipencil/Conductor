@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from conductor.config.schema import AgentDef, QuestionDef
+from conductor.config.schema import AgentDef, QuestionDef, QuestionsStepDef
 from conductor.exceptions import ExecutionError
 from conductor.executor.questions import (
     FREE_TEXT,
@@ -24,7 +24,7 @@ from conductor.executor.questions import (
 def _node(**kwargs) -> AgentDef:
     """Build a minimal questions node."""
     kwargs.setdefault("questions", [QuestionDef(text="Why?")])
-    return AgentDef(name="ask", type="questions", **kwargs)
+    return QuestionsStepDef(name="ask", **kwargs)
 
 
 class TestCoerceQuestions:

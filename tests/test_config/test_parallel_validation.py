@@ -6,6 +6,7 @@ import pytest
 
 from conductor.config.schema import (
     AgentDef,
+    HumanGateStepDef,
     ParallelGroup,
     WorkflowConfig,
     WorkflowDef,
@@ -305,10 +306,8 @@ class TestHumanGatesInParallel:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="test", entry_point="parallel1"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate1",
-                    type="human_gate",
-                    model="gpt-4",
                     prompt="Choose",
                     options=[
                         GateOption(label="Yes", value="yes", route="$end"),
@@ -371,10 +370,8 @@ class TestRoutingWithParallelGroups:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="test", entry_point="gate1"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate1",
-                    type="human_gate",
-                    model="gpt-4",
                     prompt="Choose",
                     options=[
                         GateOption(label="Parallel", value="parallel", route="parallel1"),

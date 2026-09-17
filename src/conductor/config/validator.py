@@ -10,11 +10,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeGuard
 
 import jinja2
 from jinja2 import Environment, meta, nodes
 
+from conductor.config.schema import (
+    AgentDef,
+    HumanGateStepDef,
+    QuestionsStepDef,
+    RoutableStepBase,
+    TerminateStepDef,
+    WorkflowStepDef,
+)
 from conductor.exceptions import ConfigurationError
 from conductor.plugins.errors import PluginError, PluginSourceUnavailableError
 from conductor.plugins.manifest import PluginFlavor
@@ -37,7 +45,7 @@ from conductor.skills import (
 from conductor.templating import is_jinja_template
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef, WorkflowConfig
+    from conductor.config.schema import StepDef, WorkflowConfig
     from conductor.plugins.registry import ResolvedPlugin
     from conductor.skills import ResolvedSkill
 
@@ -244,9 +252,10 @@ def _referenced_marketplaces(config: WorkflowConfig) -> set[str]:
 
     referenced = _names(config.workflow.runtime.plugins)
     for agent in config.agents:
-        referenced |= _names(agent.plugins)
+        if _is_llm_agent(agent):
+            referenced |= _names(agent.plugins)
     for group in config.for_each:
-        if group.agent is not None:
+        if _is_llm_agent(group.agent):
             referenced |= _names(group.agent.plugins)
     return referenced
 
@@ -299,11 +308,12 @@ def validate_workflow_config(
     # Validate each agent
     for agent in config.agents:
         # Validate route targets - allow routing to agents and parallel groups
-        agent_errors = _validate_agent_routes(agent.name, agent.routes, all_names)
+        agent_routes = agent.routes if isinstance(agent, RoutableStepBase) else []
+        agent_errors = _validate_agent_routes(agent.name, agent_routes, all_names)
         errors.extend(agent_errors)
 
         # Validate human_gate has options
-        if agent.type == "human_gate":
+        if isinstance(agent, HumanGateStepDef):
             if not agent.options:
                 errors.append(f"Agent '{agent.name}' is a human_gate but has no options defined")
             else:
@@ -319,7 +329,7 @@ def validate_workflow_config(
         # only after the human has worked through the node, so an unknown
         # target must not wait until then to surface.
         if (
-            agent.type == "questions"
+            isinstance(agent, QuestionsStepDef)
             and agent.abort_route is not None
             and agent.abort_route != "$end"
             and agent.abort_route not in all_names
@@ -342,19 +352,16 @@ def validate_workflow_config(
         warnings.extend(input_warnings)
 
         # Validate tool references (skip for script, set, and wait agents — they don't use tools)
-        if agent.tools is not None and agent.tools and agent.type not in ("script", "set", "wait"):
-            tool_errors = _validate_tool_references(agent.name, agent.tools, set(config.tools))
+        agent_tools = getattr(agent, "tools", None)
+        if agent_tools and agent.type not in ("script", "set", "wait"):
+            tool_errors = _validate_tool_references(agent.name, agent_tools, set(config.tools))
             errors.extend(tool_errors)
 
         # Warn when an LLM agent has system_prompt but no (non-empty) prompt.
         # Omitting `prompt:` leaves the user-authored task prompt empty, which
         # almost always means dynamic, must-execute content belongs in `prompt:`
         # alongside the persona/methodology in `system_prompt:`.
-        if (
-            agent.type in (None, "agent")
-            and agent.system_prompt
-            and not (agent.prompt and agent.prompt.strip())
-        ):
+        if _is_llm_agent(agent) and agent.system_prompt and not agent.prompt.strip():
             warnings.append(
                 f"Agent '{agent.name}' defines `system_prompt` but no `prompt` "
                 "(or only whitespace). "
@@ -372,28 +379,36 @@ def validate_workflow_config(
 
     # Validate for_each groups: reject step types that can't be used inline
     for for_each_group in config.for_each:
-        if for_each_group.agent.type == "script":
+        inline_agent = for_each_group.agent
+        if inline_agent.type == "script":
             errors.append(
                 f"For-each group '{for_each_group.name}' uses a script step as its "
                 "inline agent. Script steps cannot be used in for_each groups."
             )
-        if for_each_group.agent.type == "wait":
+        if inline_agent.type == "wait":
             errors.append(
                 f"For-each group '{for_each_group.name}' uses a wait step as its "
                 "inline agent. Wait steps cannot be used in for_each groups."
             )
-        if for_each_group.agent.type == "terminate":
+        if inline_agent.type == "terminate":
             errors.append(
                 f"For-each group '{for_each_group.name}' uses a terminate step as its "
                 "inline agent. Terminate steps cannot run inside a for_each iteration; "
                 "route to a terminate step from the for_each group's routes instead."
             )
-        if for_each_group.agent.type == "questions":
+        if inline_agent.type == "questions":
             errors.append(
                 f"For-each group '{for_each_group.name}' uses a questions step as its "
                 "inline agent. Concurrent iterations would compete for one terminal and "
                 "one dashboard prompt slot; route to a questions step from the for_each "
                 "group's routes instead."
+            )
+        if isinstance(inline_agent, HumanGateStepDef):
+            errors.append(
+                f"For-each group '{for_each_group.name}' uses a human gate as its "
+                "inline agent. Concurrent iterations would compete for one interactive "
+                "gate channel; route to a human gate from the for_each group's routes "
+                "instead."
             )
 
     # Validate sub-workflow references (local paths and registry refs).
@@ -679,11 +694,14 @@ def _validate_mcp_steps(config: WorkflowConfig) -> list[str]:
     errors: list[str] = []
     servers = config.workflow.runtime.mcp_servers
 
-    # (agent, enclosing for_each group name or None)
-    mcp_agents: list[tuple[AgentDef, str | None]] = [
-        (agent, None) for agent in config.agents if agent.type == "mcp"
+    from conductor.config.schema import MCPStepDef
+
+    mcp_agents: list[tuple[MCPStepDef, str | None]] = [
+        (agent, None) for agent in config.agents if isinstance(agent, MCPStepDef)
     ]
-    mcp_agents += [(fe.agent, fe.name) for fe in config.for_each if fe.agent.type == "mcp"]
+    mcp_agents.extend(
+        (fe.agent, fe.name) for fe in config.for_each if isinstance(fe.agent, MCPStepDef)
+    )
 
     for agent, for_each_group in mcp_agents:
         label = (
@@ -691,10 +709,6 @@ def _validate_mcp_steps(config: WorkflowConfig) -> list[str]:
             if for_each_group is None
             else f"Agent '{agent.name}' in for-each group '{for_each_group}'"
         )
-        if agent.server is None or agent.tool is None:
-            # Schema validation already rejects mcp agents without
-            # server/tool; this guard only narrows the types below.
-            continue
         server_def = servers.get(agent.server)
         if server_def is None:
             available = ", ".join(sorted(servers)) or "(none declared)"
@@ -817,7 +831,8 @@ def _validate_parallel_groups(config: WorkflowConfig) -> list[str]:
             agent = agents_by_name[agent_name]
 
             # PE-2.3: Validate parallel agents have no routes
-            if agent.routes:
+            routes = getattr(agent, "routes", [])
+            if routes:
                 errors.append(
                     f"Agent '{agent_name}' in parallel group '{pg.name}' cannot have routes. "
                     "Agents within parallel groups must not define their own routing logic."
@@ -947,19 +962,19 @@ def _build_routing_graph(config: WorkflowConfig) -> dict[str, list[tuple[str, bo
     graph: dict[str, list[tuple[str, bool]]] = {}
     for agent in config.agents:
         # Terminate steps end the workflow; treat them as sinks with no edges.
-        if agent.type == "terminate":
+        if isinstance(agent, TerminateStepDef):
             graph[agent.name] = []
             continue
         edges: list[tuple[str, bool]] = []
-        if agent.routes:
+        if isinstance(agent, RoutableStepBase) and agent.routes:
             for route in agent.routes:
                 edges.append((route.to, route.when is not None))
-        elif agent.type == "human_gate" and agent.options:
+        elif isinstance(agent, HumanGateStepDef) and agent.options:
             for option in agent.options:
                 edges.append((option.route, True))
         # An abort route is a conditional edge like any other; without it an
         # agent reachable only via abort is invisible to path analysis.
-        if agent.type == "questions" and agent.allow_abort:
+        if isinstance(agent, QuestionsStepDef) and agent.allow_abort:
             edges.append((agent.abort_route or "$end", True))
         graph[agent.name] = edges
     for pg in config.parallel:
@@ -1302,7 +1317,9 @@ def _validate_output_path_coverage(config: WorkflowConfig) -> list[str]:
     # not consume the workflow `output:` mapping and would produce spurious
     # "not reached" warnings.
     overriding_terminators = {
-        a.name for a in config.agents if a.type == "terminate" and a.output_template is not None
+        a.name
+        for a in config.agents
+        if isinstance(a, TerminateStepDef) and a.output_template is not None
     }
     paths = [p for p in paths if not p or p[-1] not in overriding_terminators]
 
@@ -1354,9 +1371,7 @@ def _collect_argument_strings(label: str, value: Any) -> list[tuple[str, str]]:
     return collected
 
 
-def _collect_template_strings(
-    agent: AgentDef,
-) -> list[tuple[str, str]]:
+def _collect_template_strings(agent: StepDef) -> list[tuple[str, str]]:
     """Collect all Jinja2 template strings from an agent definition.
 
     Returns:
@@ -1364,16 +1379,20 @@ def _collect_template_strings(
     """
     templates: list[tuple[str, str]] = []
 
-    if agent.prompt:
-        templates.append((f"agent '{agent.name}' prompt", agent.prompt))
-    if agent.system_prompt:
-        templates.append((f"agent '{agent.name}' system_prompt", agent.system_prompt))
-    if agent.command:
-        templates.append((f"agent '{agent.name}' command", agent.command))
-    for i, arg in enumerate(agent.args):
+    prompt = getattr(agent, "prompt", None)
+    if prompt:
+        templates.append((f"agent '{agent.name}' prompt", prompt))
+    system_prompt = getattr(agent, "system_prompt", None)
+    if system_prompt:
+        templates.append((f"agent '{agent.name}' system_prompt", system_prompt))
+    command = getattr(agent, "command", None)
+    if command:
+        templates.append((f"agent '{agent.name}' command", command))
+    for i, arg in enumerate(getattr(agent, "args", [])):
         templates.append((f"agent '{agent.name}' args[{i}]", arg))
-    if agent.working_dir:
-        templates.append((f"agent '{agent.name}' working_dir", agent.working_dir))
+    working_dir = getattr(agent, "working_dir", None)
+    if working_dir:
+        templates.append((f"agent '{agent.name}' working_dir", working_dir))
     # getattr for the same reason the 'set' bindings below use it: duck-typed
     # test fixtures predate this field and would raise on direct access.
     settings_dir = getattr(agent, "settings_dir", None)
@@ -1415,19 +1434,19 @@ def _collect_template_strings(
     # `SimpleNamespace`-style stubs are forward-compat tests like
     # `TestInputMappingTemplateCollection`) never set `type="terminate"`, so
     # they don't enter this branch and don't need the `getattr` fallback.
-    from conductor.config.schema import AgentDef as _AgentDef
+    from conductor.config.schema import TerminateStepDef
 
-    if isinstance(agent, _AgentDef) and agent.type == "terminate":
-        if agent.reason is not None:
-            templates.append((f"agent '{agent.name}' reason", agent.reason))
+    if isinstance(agent, TerminateStepDef):
+        templates.append((f"agent '{agent.name}' reason", agent.reason))
         if agent.output_template:
             for key, expr in agent.output_template.items():
                 templates.append((f"agent '{agent.name}' output_template.{key}", expr))
 
     # Questions steps: text/hint/choices are Jinja2-rendered by the engine, so
     # bad refs must fail at validate-time like every other rendered field.
-    if isinstance(agent, _AgentDef) and agent.questions:
-        for i, question in enumerate(agent.questions):
+    questions = getattr(agent, "questions", None)
+    if questions:
+        for i, question in enumerate(questions):
             templates.append((f"agent '{agent.name}' questions[{i}].text", question.text))
             if question.hint:
                 templates.append((f"agent '{agent.name}' questions[{i}].hint", question.hint))
@@ -1491,11 +1510,11 @@ def _validate_subworkflow_refs(
     # Collect all (agent_name, workflow_ref, context_label) tuples to validate.
     candidates: list[tuple[str, str, str]] = []
     for agent in config.agents:
-        if agent.type == "workflow" and agent.workflow:
+        if isinstance(agent, WorkflowStepDef) and agent.workflow:
             candidates.append((agent.name, agent.workflow, f"agent '{agent.name}'"))
     for fe in config.for_each:
         agent = fe.agent
-        if agent.type == "workflow" and agent.workflow:
+        if isinstance(agent, WorkflowStepDef) and agent.workflow:
             candidates.append(
                 (agent.name, agent.workflow, f"for_each group '{fe.name}' agent '{agent.name}'")
             )
@@ -1661,7 +1680,7 @@ def _validate_template_references(
     is_explicit = config.workflow.context.mode == "explicit"
 
     # Collect all agents including for-each inline agents.
-    all_agents: list[tuple[AgentDef, set[str]]] = []
+    all_agents: list[tuple[StepDef, set[str]]] = []
     for agent in config.agents:
         all_agents.append((agent, all_names))
     for fe in config.for_each:
@@ -1910,15 +1929,9 @@ def _validate_template_references(
 # Provider capability cross-checks (issue #241)
 # ---------------------------------------------------------------------------
 
-# Agent types that drive a provider. All other types (human_gate, questions,
-# script, set, terminate, wait, workflow) do not invoke a provider directly and
-# are skipped by every capability check.
-_LLM_AGENT_TYPES = frozenset({None, "agent"})
 
-
-def _is_llm_agent(agent: AgentDef) -> bool:
-    """True iff this agent invokes a provider (vs. human_gate, script, etc.)."""
-    return agent.type in _LLM_AGENT_TYPES
+def _is_llm_agent(agent: StepDef) -> TypeGuard[AgentDef]:
+    return isinstance(agent, AgentDef)
 
 
 def _project_tier_enabled(config: WorkflowConfig, agent: AgentDef) -> bool:
@@ -2899,7 +2912,7 @@ def _validate_provider_capabilities(
         claimed: dict[tuple[str, str | None], str] = {}
         for member_name in pg.agents:
             member = agent_by_name.get(member_name)
-            if member is None or member.session_key is None:
+            if member is None or not _is_llm_agent(member) or member.session_key is None:
                 continue
             slot = (member.session_key, _effective_working_dir(member))
             first = claimed.get(slot)
@@ -2916,16 +2929,19 @@ def _validate_provider_capabilities(
                 claimed[slot] = member_name
 
     for fe in config.for_each:
-        if fe.max_concurrent <= 1 or fe.agent.session_key is None:
+        session_key = getattr(fe.agent, "session_key", None)
+        if fe.max_concurrent <= 1 or session_key is None:
             continue
         # A per-item working_dir gives each iteration its own session, so only
         # a directory shared by every iteration is unsafe.
+        if not _is_llm_agent(fe.agent):
+            continue
         working_dir = _effective_working_dir(fe.agent) or ""
         if _references_loop_variable(working_dir, fe.as_):
             continue
         errors.append(
             f"For-each group '{fe.name}' has max_concurrent={fe.max_concurrent} "
-            f"and declares session_key: '{fe.agent.session_key}' without a "
+            f"and declares session_key: '{session_key}' without a "
             f"per-item working_dir. Every iteration would resume one session "
             f"concurrently — set max_concurrent: 1, remove the session_key, or "
             f"give each item its own working_dir."

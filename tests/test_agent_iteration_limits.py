@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from conductor.config.schema import AgentDef, OutputField, RuntimeConfig
+from conductor.config.schema import AgentDef, OutputField, RuntimeConfig, ScriptStepDef
 from conductor.exceptions import ProviderError
 from conductor.providers.copilot import CopilotProvider
 from conductor.providers.factory import create_provider
@@ -84,16 +84,17 @@ class TestAgentDefMaxAgentIterations:
 
     def test_script_agent_rejects_max_agent_iterations(self) -> None:
         with pytest.raises(ValidationError, match="max_agent_iterations"):
-            AgentDef(
+            ScriptStepDef(
                 name="test",
-                type="script",
                 command="echo hi",
                 max_agent_iterations=10,
             )
 
     def test_script_agent_without_max_agent_iterations_ok(self) -> None:
-        agent = AgentDef(name="test", type="script", command="echo hi")
-        assert agent.max_agent_iterations is None
+        # Requirement: a script step constructs without any LLM iteration field —
+        # max_agent_iterations is owned by AgentDef alone after the step-model split.
+        agent = ScriptStepDef(name="test", command="echo hi")
+        assert not hasattr(agent, "max_agent_iterations")
 
 
 # ---------------------------------------------------------------------------

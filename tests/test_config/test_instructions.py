@@ -424,13 +424,13 @@ class TestSubWorkflowInstructionMerging:
         import textwrap
 
         from conductor.config.schema import (
-            AgentDef,
             ContextConfig,
             LimitsConfig,
             RouteDef,
             RuntimeConfig,
             WorkflowConfig,
             WorkflowDef,
+            WorkflowStepDef,
         )
         from conductor.engine.workflow import WorkflowEngine
         from conductor.providers.copilot import CopilotProvider
@@ -469,9 +469,8 @@ class TestSubWorkflowInstructionMerging:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="step",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -509,13 +508,13 @@ class TestSubWorkflowInstructionMerging:
 
         from conductor.config.instructions import _wrap_preamble
         from conductor.config.schema import (
-            AgentDef,
             ContextConfig,
             LimitsConfig,
             RouteDef,
             RuntimeConfig,
             WorkflowConfig,
             WorkflowDef,
+            WorkflowStepDef,
         )
         from conductor.engine.workflow import WorkflowEngine
         from conductor.providers.copilot import CopilotProvider
@@ -556,9 +555,8 @@ class TestSubWorkflowInstructionMerging:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="step",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),

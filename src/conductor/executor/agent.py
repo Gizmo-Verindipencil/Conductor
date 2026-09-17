@@ -660,8 +660,6 @@ class AgentExecutor:
             SkillManifestError: If an explicit entry's ``SKILL.md`` is
                 missing, unparseable, or incomplete.
         """
-        if agent.type not in (None, "agent"):
-            return []
         overridden = agent.skills is not None
         # Repeat the ``is not None`` rather than reusing ``overridden``: the
         # type checker does not narrow through an intermediate boolean.
@@ -715,8 +713,6 @@ class AgentExecutor:
             PluginError: If an entry cannot be resolved, or a resolved
                 plugin is unusable.
         """
-        if agent.type not in (None, "agent"):
-            return []
         entries = list(agent.plugins) if agent.plugins is not None else list(self._workflow_plugins)
         if not entries:
             return []

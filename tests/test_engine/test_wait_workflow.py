@@ -25,6 +25,7 @@ from conductor.config.schema import (
     LimitsConfig,
     RouteDef,
     RuntimeConfig,
+    WaitStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -60,9 +61,8 @@ class TestWaitWorkflowLinear:
     async def test_wait_runs_to_end(self) -> None:
         config = _make_config(
             [
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="50ms",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -85,9 +85,8 @@ class TestWaitWorkflowLinear:
         ``waited_seconds`` is exposed in workflow context."""
         config = _make_config(
             [
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="20ms",
                     reason="should not leak into context",
                     routes=[RouteDef(to="$end")],
@@ -109,9 +108,8 @@ class TestWaitWorkflowTimeout:
         """A long wait must be cancelled by the workflow-level timeout."""
         config = _make_config(
             [
-                AgentDef(
+                WaitStepDef(
                     name="long_pause",
-                    type="wait",
                     duration="60s",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -133,9 +131,8 @@ class TestWaitWorkflowEvents:
 
         config = _make_config(
             [
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="20ms",
                     reason="quick",
                     routes=[RouteDef(to="$end")],
@@ -194,9 +191,8 @@ class TestWaitWorkflowEvents:
                 },
             ),
             agents=[
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="{{ workflow.input.hours }}h",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -233,9 +229,8 @@ class TestWaitWorkflowTemplatedDuration:
                 },
             ),
             agents=[
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="{{ workflow.input.interval_ms }}ms",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -266,9 +261,8 @@ class TestWaitWorkflowInterrupt:
         interrupt_event = asyncio.Event()
         config = _make_config(
             [
-                AgentDef(
+                WaitStepDef(
                     name="long_pause",
-                    type="wait",
                     duration="30s",
                     routes=[RouteDef(to="$end")],
                 ),

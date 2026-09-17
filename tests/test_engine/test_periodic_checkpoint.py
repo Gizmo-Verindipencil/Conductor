@@ -31,6 +31,9 @@ from conductor.config.schema import (
     LimitsConfig,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
+    TerminateStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -53,9 +56,8 @@ def _runtime_with_checkpoint(checkpoint: CheckpointConfig) -> RuntimeConfig:
 
 def _script(name: str, text: str, to: str) -> AgentDef:
     """A script step that prints *text* and routes to *to*."""
-    return AgentDef(
+    return ScriptStepDef(
         name=name,
-        type="script",
         command=sys.executable,
         args=["-c", f"print({text!r})"],
         routes=[RouteDef(to=to)],
@@ -228,9 +230,8 @@ class TestPeriodicCheckpointEngine:
 
         # Last step is a set step that raises at render time (division by zero),
         # forcing a runtime failure after periodic checkpoints were saved.
-        boom = AgentDef(
+        boom = SetStepDef(
             name="step3",
-            type="set",
             value="{{ 1 // 0 }}",
             routes=[RouteDef(to="$end")],
         )
@@ -261,9 +262,8 @@ class TestPeriodicCheckpointEngine:
 
         def counter_step(name: str, path: Path, to: str) -> AgentDef:
             code = f"open({str(path)!r}, 'a').write('x')"
-            return AgentDef(
+            return ScriptStepDef(
                 name=name,
-                type="script",
                 command=sys.executable,
                 args=["-c", code],
                 routes=[RouteDef(to=to)],
@@ -421,7 +421,7 @@ class TestPeriodicRotationEndToEnd:
 
         # 4 successful steps then a failing set step (so success-cleanup does
         # NOT run and we can observe the rotated periodic checkpoints on disk).
-        boom = AgentDef(name="boom", type="set", value="{{ 1 // 0 }}", routes=[RouteDef(to="$end")])
+        boom = SetStepDef(name="boom", value="{{ 1 // 0 }}", routes=[RouteDef(to="$end")])
         config = WorkflowConfig(
             workflow=WorkflowDef(
                 name="periodic-ckpt",
@@ -514,8 +514,8 @@ class TestPeriodicCleanupTerminalOutcomes:
             # First run: fail at the end so periodic checkpoints persist.
             boom_cfg = _three_step_config(
                 CheckpointConfig(every_agent=True),
-                last_step=AgentDef(
-                    name="step3", type="set", value="{{ 1 // 0 }}", routes=[RouteDef(to="$end")]
+                last_step=SetStepDef(
+                    name="step3", value="{{ 1 // 0 }}", routes=[RouteDef(to="$end")]
                 ),
             )
             engine = _make_engine(boom_cfg, wf, WorkflowEventEmitter())
@@ -553,7 +553,7 @@ class TestPeriodicCleanupTerminalOutcomes:
 
         # step1 -> step2 -> terminate(failed). Explicit failed terminate is
         # non-resumable, so its periodic checkpoints must be cleaned up.
-        terminate = AgentDef(name="stop", type="terminate", status="failed", reason="done")
+        terminate = TerminateStepDef(name="stop", status="failed", reason="done")
         config = WorkflowConfig(
             workflow=WorkflowDef(
                 name="periodic-ckpt",

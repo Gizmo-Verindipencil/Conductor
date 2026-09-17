@@ -326,8 +326,10 @@ class TestSessionKeyExample:
         assert config.workflow.runtime.provider.name == "claude-agent-sdk"
 
     def test_the_loop_back_and_the_hand_off_share_one_key(self) -> None:
+        from conductor.config.schema import AgentDef
+
         config = load_config(self._workflow_file)
-        keys = {a.name: a.session_key for a in config.agents}
+        keys = {a.name: a.session_key if isinstance(a, AgentDef) else None for a in config.agents}
 
         assert keys["investigate"] == keys["summarize"] == "investigation"
         # A script step has no provider session; the schema rejects a key there.

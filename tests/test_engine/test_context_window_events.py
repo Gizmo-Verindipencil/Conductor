@@ -20,6 +20,7 @@ from conductor.config.schema import (
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    WaitStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -791,9 +792,8 @@ class TestNonLlmStepsSkipTheProviderLookup:
                 limits=LimitsConfig(max_iterations=5),
             ),
             agents=[
-                AgentDef(
+                WaitStepDef(
                     name="pause",
-                    type="wait",
                     duration="1ms",
                     routes=[RouteDef(to="$end")],
                 ),

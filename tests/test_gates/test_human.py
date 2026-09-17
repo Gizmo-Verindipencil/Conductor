@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from conductor.config.schema import AgentDef, GateOption
+from conductor.config.schema import AgentDef, GateOption, HumanGateStepDef
 from conductor.exceptions import HumanGateError
 from conductor.gates.human import (
     DIALOG_SUBMIT_SENTINEL,
@@ -67,9 +67,8 @@ def sample_options_with_prompt_for() -> list[GateOption]:
 @pytest.fixture
 def human_gate_agent(sample_options: list[GateOption]) -> AgentDef:
     """Create a sample human_gate agent."""
-    return AgentDef(
+    return HumanGateStepDef(
         name="approval_gate",
-        type="human_gate",
         prompt="Please review the following content:\n\n{{ agent1.output }}",
         options=sample_options,
     )
@@ -80,9 +79,8 @@ def human_gate_agent_with_prompt_for(
     sample_options_with_prompt_for: list[GateOption],
 ) -> AgentDef:
     """Create a sample human_gate agent with prompt_for option."""
-    return AgentDef(
+    return HumanGateStepDef(
         name="feedback_gate",
-        type="human_gate",
         prompt="Please provide your feedback:",
         options=sample_options_with_prompt_for,
     )
@@ -535,9 +533,8 @@ class TestGatePromptMarkdownRendering:
         """Verify Panel receives a RichMarkdown object, not a bare string."""
         from rich.markdown import Markdown as RichMarkdown
 
-        agent = AgentDef(
+        agent = HumanGateStepDef(
             name="md_gate",
-            type="human_gate",
             prompt="## Review\n\n- [plan](./plan.md)\n- **bold** text",
             options=sample_options,
         )
@@ -564,9 +561,8 @@ class TestGatePromptMarkdownRendering:
         sample_options: list[GateOption],
     ) -> None:
         """Verify that skip_gates mode auto-selects without displaying the Panel."""
-        agent = AgentDef(
+        agent = HumanGateStepDef(
             name="skip_md_gate",
-            type="human_gate",
             prompt="# Auto-review\nPlain text here.",
             options=sample_options,
         )
@@ -589,9 +585,8 @@ class TestMultilineAdditionalInput:
     @pytest.fixture
     def multiline_agent(self) -> AgentDef:
         """A gate whose only option collects multi-line feedback."""
-        return AgentDef(
+        return HumanGateStepDef(
             name="review_gate",
-            type="human_gate",
             prompt="Review it",
             options=[
                 GateOption(

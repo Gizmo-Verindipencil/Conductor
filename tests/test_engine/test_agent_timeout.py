@@ -19,14 +19,16 @@ from conductor.config.schema import (
     AgentDef,
     ContextConfig,
     ForEachDef,
-    GateOption,
+    HumanGateStepDef,
     LimitsConfig,
     OutputField,
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.engine.workflow import WorkflowEngine
 from conductor.events import WorkflowEvent, WorkflowEventEmitter
@@ -103,37 +105,52 @@ class TestAgentTimeoutSchema:
 
     def test_script_agent_rejects_timeout_seconds(self) -> None:
         """Script agents must use 'timeout', not 'timeout_seconds'."""
-        with pytest.raises(ValueError, match="script agents cannot have 'timeout_seconds'"):
-            AgentDef(
-                name="script1",
-                type="script",
-                command="echo hello",
-                timeout_seconds=30.0,
-                routes=[RouteDef(to="$end")],
+        with pytest.raises(ValueError) as exc_info:
+            ScriptStepDef.model_validate(
+                {
+                    "name": "script1",
+                    "command": "echo hello",
+                    "timeout_seconds": 30.0,
+                    "routes": [{"to": "$end"}],
+                }
             )
+        assert any(
+            e["loc"] == ("timeout_seconds",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_human_gate_rejects_timeout_seconds(self) -> None:
         """Human gate agents cannot have timeout_seconds."""
-        with pytest.raises(ValueError, match="human_gate agents cannot have 'timeout_seconds'"):
-            AgentDef(
-                name="gate1",
-                type="human_gate",
-                prompt="Choose",
-                options=[GateOption(label="Yes", value="yes", route="$end")],
-                timeout_seconds=30.0,
-                routes=[RouteDef(to="$end")],
+        with pytest.raises(ValueError) as exc_info:
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate1",
+                    "prompt": "Choose",
+                    "options": [{"label": "Yes", "value": "yes", "route": "$end"}],
+                    "timeout_seconds": 30.0,
+                    "routes": [{"to": "$end"}],
+                }
             )
+        assert any(
+            e["loc"] == ("timeout_seconds",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_workflow_agent_rejects_timeout_seconds(self) -> None:
         """Workflow agents cannot have timeout_seconds."""
-        with pytest.raises(ValueError, match="workflow agents cannot have 'timeout_seconds'"):
-            AgentDef(
-                name="sub1",
-                type="workflow",
-                workflow="./sub.yaml",
-                timeout_seconds=30.0,
-                routes=[RouteDef(to="$end")],
+        with pytest.raises(ValueError) as exc_info:
+            WorkflowStepDef.model_validate(
+                {
+                    "name": "sub1",
+                    "workflow": "./sub.yaml",
+                    "timeout_seconds": 30.0,
+                    "routes": [{"to": "$end"}],
+                }
             )
+        assert any(
+            e["loc"] == ("timeout_seconds",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 # ---------------------------------------------------------------------------

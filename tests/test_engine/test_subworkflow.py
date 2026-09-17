@@ -29,6 +29,7 @@ from conductor.config.schema import (
     RuntimeConfig,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.engine.workflow import MAX_SUBWORKFLOW_DEPTH, WorkflowEngine
 from conductor.exceptions import ExecutionError
@@ -87,9 +88,8 @@ class TestSubWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -143,9 +143,8 @@ class TestSubWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="synthesizer")],
                 ),
@@ -215,9 +214,8 @@ class TestSubWorkflowDepthLimit:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -254,9 +252,8 @@ class TestSubWorkflowErrors:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="nonexistent.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -303,9 +300,8 @@ class TestSubWorkflowErrors:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="parent.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -353,9 +349,8 @@ class TestSubWorkflowErrors:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="parent.yaml",
                     max_depth=2,
                     routes=[RouteDef(to="$end")],
@@ -408,9 +403,8 @@ class TestSubWorkflowRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[
                         RouteDef(
@@ -486,9 +480,8 @@ class TestSubWorkflowMixed:
                     prompt="Setup the work",
                     routes=[RouteDef(to="sub_wf")],
                 ),
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -524,9 +517,8 @@ class TestSubWorkflowDryRun:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="./sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -580,9 +572,8 @@ class TestSubWorkflowIterationCounting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -649,9 +640,8 @@ class TestSubWorkflowInputMapping:
                     prompt="Setup",
                     routes=[RouteDef(to="sub_wf")],
                 ),
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     input_mapping={
                         "item_id": "{{ setup.output.id }}",
@@ -731,9 +721,8 @@ class TestSubWorkflowInputMapping:
                     prompt="Setup",
                     routes=[RouteDef(to="sub_wf")],
                 ),
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     input_mapping={
                         "count": "{{ setup.output.num }}",
@@ -803,9 +792,8 @@ class TestSubWorkflowInputMapping:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     # No input_mapping — should forward parent's workflow.input.*
                     routes=[RouteDef(to="$end")],
@@ -864,9 +852,8 @@ class TestSubWorkflowInputMapping:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     input_mapping={},  # Explicitly empty — pass nothing
                     routes=[RouteDef(to="$end")],
@@ -924,9 +911,8 @@ class TestSubWorkflowInputMapping:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     input_mapping={
                         "value": "{{ nonexistent_agent.output.missing }}",
@@ -986,9 +972,8 @@ class TestSubWorkflowInputMapping:
                     prompt="Setup",
                     routes=[RouteDef(to="sub_wf")],
                 ),
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     input_mapping={"data": "{{ setup.output.value }}"},
                     routes=[RouteDef(to="$end")],
@@ -1074,9 +1059,8 @@ class TestSubWorkflowDashboardPath:
                     source="finder.output.items",
                     **{"as": "item"},
                     max_concurrent=1,
-                    agent=AgentDef(
+                    agent=WorkflowStepDef(
                         name="runner",
-                        type="workflow",
                         workflow="sub.yaml",
                         input_mapping={"item": "{{ item }}"},
                     ),
@@ -1150,9 +1134,8 @@ class TestSubWorkflowDashboardPath:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1229,9 +1212,8 @@ class TestSubWorkflowDashboardPath:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1316,9 +1298,8 @@ class TestSubWorkflowDashboardPath:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="mid",
-                    type="workflow",
                     workflow="mid.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1425,9 +1406,8 @@ class TestSubWorkflowDashboardPath:
                     source="finder.output.items",
                     **{"as": "item"},
                     max_concurrent=3,
-                    agent=AgentDef(
+                    agent=WorkflowStepDef(
                         name="runner",
-                        type="workflow",
                         workflow="sub.yaml",
                         input_mapping={"item": "{{ item }}"},
                     ),
@@ -1523,9 +1503,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="analysis@team-a#v1.0.0",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1587,9 +1566,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="missing@unknown-registry#v1.0.0",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1660,9 +1638,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="analysis",  # extensionless — local file wins
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1702,9 +1679,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="a@b@c",  # two '@' signs — malformed
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1780,9 +1756,8 @@ class TestRegistrySubWorkflowResolution:
                     prompt="plan",
                     routes=[RouteDef(to="sub_wf")],
                 ),
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="analysis@team-a#v1.0.0",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1915,9 +1890,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="analysis@myorg/workflows#v1.0.0",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1968,9 +1942,8 @@ class TestRegistrySubWorkflowResolution:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="missing@acme/tools#latest",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2191,9 +2164,8 @@ class TestSubWorkflowTerminate:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2253,9 +2225,8 @@ class TestSubWorkflowTerminate:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2375,9 +2346,8 @@ class TestSubWorkflowTerminate:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="research",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2476,9 +2446,8 @@ class TestSubWorkflowTerminate:
                         "type": "for_each",
                         "source": "finder.output.items",
                         "as": "item",
-                        "agent": AgentDef(
+                        "agent": WorkflowStepDef(
                             name="child",
-                            type="workflow",
                             workflow="sub.yaml",
                             input_mapping={"item": "{{ item }}"},
                         ),
@@ -2561,9 +2530,8 @@ class TestSubWorkflowWorkingDir:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="child_subdir/child.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2624,9 +2592,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2696,9 +2663,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="child.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2728,9 +2694,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="does-not-exist.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2784,9 +2749,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="self.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2860,9 +2824,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="a.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -2936,9 +2899,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="level_0.yaml",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -3007,9 +2969,8 @@ class TestStaticSubworkflowTopology:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="sub_wf",
-                    type="workflow",
                     workflow="analysis@team-a#v1.0.0",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -3111,9 +3072,8 @@ class TestSubWorkflowGateEnvironment:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="nested",
-                    type="workflow",
                     workflow="sub.yaml",
                     routes=[RouteDef(to="$end")],
                 ),

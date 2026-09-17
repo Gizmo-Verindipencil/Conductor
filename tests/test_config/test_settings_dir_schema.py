@@ -22,12 +22,20 @@ from pydantic import ValidationError
 from conductor.config.schema import (
     AgentDef,
     GateOption,
+    HumanGateStepDef,
     OutputField,
     ProviderSettings,
+    QuestionsStepDef,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
+    StepDef,
+    TerminateStepDef,
+    WaitStepDef,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.config.validator import validate_workflow_config
 from conductor.exceptions import ConfigurationError
@@ -74,31 +82,58 @@ class TestSettingsDirRejectedOnNonProviderSteps:
     """
 
     @pytest.mark.parametrize(
-        ("kwargs",),
+        ("model", "fields"),
         [
-            ({"type": "wait", "duration": "1s"},),
-            ({"type": "set", "value": "x"},),
-            ({"type": "terminate", "status": "success", "reason": "done"},),
-            ({"type": "script", "command": "echo hi"},),
-            ({"type": "workflow", "workflow": "child.yaml"},),
-            ({"type": "questions", "questions": [{"id": "a", "text": "x"}]},),
+            (WaitStepDef, {"duration": "1s"}),
+            (SetStepDef, {"value": "x"}),
+            (TerminateStepDef, {"status": "success", "reason": "done"}),
+            (ScriptStepDef, {"command": "echo hi"}),
+            (WorkflowStepDef, {"workflow": "child.yaml"}),
+            (QuestionsStepDef, {"questions": [{"id": "a", "text": "x"}]}),
             (
+                HumanGateStepDef,
                 {
-                    "type": "human_gate",
                     "prompt": "ok?",
                     "options": [GateOption(label="OK", value="ok", route="$end")],
                 },
             ),
         ],
+        ids=["wait", "set", "terminate", "script", "workflow", "questions", "human_gate"],
     )
-    def test_rejected(self, kwargs: dict) -> None:
-        with pytest.raises(ValidationError, match="cannot have 'settings_dir'"):
-            AgentDef(name="bad", settings_dir="/repo", **kwargs)
+    def test_rejected(self, model: type[StepDef], fields: dict) -> None:
+        """Each non-provider variant refuses the field via ``extra="forbid"``.
+
+        The per-type "cannot have 'settings_dir'" messages were removed in the
+        step-model split; the contract is now Pydantic's standard
+        extra_forbidden error on the foreign field.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            model.model_validate({"name": "bad", **fields, "settings_dir": "/repo"})
+        assert any(
+            e["loc"] == ("settings_dir",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_error_names_the_step_type(self) -> None:
-        """So the message says which step to fix, not merely that one is wrong."""
-        with pytest.raises(ValidationError, match="wait agents cannot have 'settings_dir'"):
-            AgentDef(name="bad", type="wait", duration="1s", settings_dir="/repo")
+        """The failure must attribute the error to the offending step.
+
+        Without the old custom messages, attribution comes from the schema
+        error location, which carries the step's index, its variant tag, and
+        the field — here ``('agents', 0, 'wait', 'settings_dir')``.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            WorkflowConfig.model_validate(
+                {
+                    "workflow": {"name": "w", "entry_point": "bad"},
+                    "agents": [
+                        {"type": "wait", "name": "bad", "duration": "1s", "settings_dir": "/repo"}
+                    ],
+                }
+            )
+        assert any(
+            e["loc"] == ("agents", 0, "wait", "settings_dir") and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 class TestSettingsDirValidation:
@@ -114,21 +149,22 @@ class TestSettingsDirValidation:
 
     @staticmethod
     def _config(provider: object, settings_dir: str, tmp_path: Path) -> WorkflowConfig:
+        agents: list[StepDef] = [
+            AgentDef(
+                name="a",
+                prompt="hi",
+                settings_dir=settings_dir,
+                output={"r": OutputField(type="string")},
+                routes=[RouteDef(to="$end")],
+            )
+        ]
         return WorkflowConfig(
             workflow=WorkflowDef(
                 name="w",
                 entry_point="a",
                 runtime=RuntimeConfig(provider=provider),  # type: ignore[arg-type]
             ),
-            agents=[
-                AgentDef(
-                    name="a",
-                    prompt="hi",
-                    settings_dir=settings_dir,
-                    output={"r": OutputField(type="string")},
-                    routes=[RouteDef(to="$end")],
-                )
-            ],
+            agents=agents,
             output={"r": "{{ a.output.r }}"},
         )
 
@@ -211,8 +247,12 @@ class TestEmptySettingsDirIsRefused:
         With truthiness guards and no schema constraint, ``settings_dir=""``
         was accepted on a ``wait`` step despite the documented rejection.
         """
-        with pytest.raises(ValidationError):
-            AgentDef(name="w", type="wait", duration="1s", settings_dir="")
+        with pytest.raises(ValidationError) as exc_info:
+            WaitStepDef.model_validate({"name": "w", "duration": "1s", "settings_dir": ""})
+        assert any(
+            e["loc"] == ("settings_dir",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 class TestProjectTierWarningCauses:
@@ -230,22 +270,23 @@ class TestProjectTierWarningCauses:
 
     @staticmethod
     def _warn(provider: object, agent_extra: dict, tmp_path: Path) -> str | None:
+        agents: list[StepDef] = [
+            AgentDef(
+                name="a",
+                prompt="hi",
+                settings_dir=str(tmp_path),
+                output={"r": OutputField(type="string")},
+                routes=[RouteDef(to="$end")],
+                **agent_extra,
+            )
+        ]
         config = WorkflowConfig(
             workflow=WorkflowDef(
                 name="w",
                 entry_point="a",
                 runtime=RuntimeConfig(provider=provider),  # type: ignore[arg-type]
             ),
-            agents=[
-                AgentDef(
-                    name="a",
-                    prompt="hi",
-                    settings_dir=str(tmp_path),
-                    output={"r": OutputField(type="string")},
-                    routes=[RouteDef(to="$end")],
-                    **agent_extra,
-                )
-            ],
+            agents=agents,
             output={"r": "{{ a.output.r }}"},
         )
         hits = [w for w in validate_workflow_config(config) if "settings_dir" in w]

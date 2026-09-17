@@ -408,7 +408,9 @@ def display_validation_success(
     for_each_group_count = len(config.for_each)
 
     # Count conditional routes
-    conditional_route_count = sum(1 for a in config.agents for r in a.routes if r.when)
+    conditional_route_count = sum(
+        1 for a in config.agents for r in getattr(a, "routes", []) if r.when
+    )
 
     # Determine workflow patterns
     patterns = []
@@ -419,7 +421,7 @@ def display_validation_success(
     agent_names = [a.name for a in config.agents]
     has_loop = False
     for i, agent in enumerate(config.agents):
-        for route in agent.routes:
+        for route in getattr(agent, "routes", []):
             if route.to in agent_names:
                 target_idx = agent_names.index(route.to)
                 if target_idx <= i:
@@ -483,13 +485,14 @@ def display_validation_success(
         for agent in config.agents:
             agent_type = agent.type or "agent"
             model = (
-                agent.model
+                getattr(agent, "model", None)
                 or config.workflow.runtime.default_model
                 or Text.from_markup("[dim]default[/dim]")
             )
 
-            if agent.routes:
-                route_targets = [r.to for r in agent.routes]
+            routes = getattr(agent, "routes", [])
+            if routes:
+                route_targets = [r.to for r in routes]
                 routes_str = ", ".join(route_targets[:3])
                 if len(route_targets) > 3:
                     routes_str += f" (+{len(route_targets) - 3} more)"

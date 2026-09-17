@@ -39,13 +39,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from conductor.config.schema import (
-    AgentDef,
     ContextConfig,
     LimitsConfig,
     MCPServerDef,
+    MCPStepDef,
     OutputField,
     RouteDef,
     RuntimeConfig,
+    SetStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -120,9 +121,8 @@ def _mcp_workflow(*, arguments: dict[str, Any] | None = None) -> WorkflowConfig:
             limits=LimitsConfig(max_iterations=10),
         ),
         agents=[
-            AgentDef(
+            MCPStepDef(
                 name="call",
-                type="mcp",
                 server="srv",
                 tool="echo",
                 arguments=arguments or {"q": "hello"},
@@ -151,17 +151,15 @@ class TestMcpOnlyWorkflow:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                MCPStepDef(
                     name="first",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     arguments={"q": "hello"},
                     routes=[RouteDef(to="second")],
                 ),
-                AgentDef(
+                MCPStepDef(
                     name="second",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     arguments={"q": "follow-up-{{ first.output.answer }}"},
@@ -221,15 +219,13 @@ class TestMcpRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="flag",
-                    type="set",
                     values={"q": "{{ workflow.input.q }}"},
                     routes=[RouteDef(to="call")],
                 ),
-                AgentDef(
+                MCPStepDef(
                     name="call",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     arguments={"q": "{{ flag.output.q }}"},
@@ -238,15 +234,13 @@ class TestMcpRouting:
                         RouteDef(to="on_ok"),
                     ],
                 ),
-                AgentDef(
+                SetStepDef(
                     name="on_error",
-                    type="set",
                     value="error-path",
                     routes=[RouteDef(to="$end")],
                 ),
-                AgentDef(
+                SetStepDef(
                     name="on_ok",
-                    type="set",
                     value="ok-path",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -430,9 +424,8 @@ class TestMcpRuntimeChecks:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                MCPStepDef(
                     name="call",
-                    type="mcp",
                     server="ghost",
                     tool="echo",
                     routes=[RouteDef(to="$end")],
@@ -469,9 +462,8 @@ class TestMcpRuntimeChecks:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                MCPStepDef(
                     name="call",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     routes=[RouteDef(to="$end")],
@@ -518,9 +510,8 @@ class TestMcpRuntimeChecks:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                MCPStepDef(
                     name="call",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     routes=[RouteDef(to="$end")],
@@ -940,15 +931,13 @@ class TestMcpExplicitContextMode:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="prep",
-                    type="set",
                     value="from-prep",
                     routes=[RouteDef(to="call")],
                 ),
-                AgentDef(
+                MCPStepDef(
                     name="call",
-                    type="mcp",
                     server="srv",
                     tool="echo",
                     input=["prep.output"],

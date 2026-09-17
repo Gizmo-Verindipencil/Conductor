@@ -17,11 +17,11 @@ import pytest
 
 from conductor.cli.run import _run_with_stop_signal
 from conductor.config.schema import (
-    AgentDef,
     ContextConfig,
     LimitsConfig,
     RouteDef,
     RuntimeConfig,
+    WaitStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -52,9 +52,8 @@ def _wait_workflow() -> WorkflowConfig:
             limits=LimitsConfig(max_iterations=10),
         ),
         agents=[
-            AgentDef(
+            WaitStepDef(
                 name="pause",
-                type="wait",
                 duration="30s",
                 routes=[RouteDef(to="$end")],
             ),

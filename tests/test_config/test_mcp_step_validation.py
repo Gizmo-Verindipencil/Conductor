@@ -22,6 +22,7 @@ from conductor.config.schema import (
     ForEachDef,
     InputDef,
     MCPServerDef,
+    MCPStepDef,
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
@@ -67,9 +68,8 @@ def _mcp_agent(
     tool: str = "do_thing",
     arguments: dict[str, object] | None = None,
 ) -> AgentDef:
-    return AgentDef(
+    return MCPStepDef(
         name=name,
-        type="mcp",
         server=server,
         tool=tool,
         arguments=arguments,

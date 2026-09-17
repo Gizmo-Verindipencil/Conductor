@@ -1595,7 +1595,14 @@ class TestReplaySyntheticFromContext:
 
     def _build_config(self):
         """Build a minimal WorkflowConfig with one agent + one script + one wait for tests."""
-        from conductor.config.schema import AgentDef, RuntimeConfig, WorkflowConfig, WorkflowDef
+        from conductor.config.schema import (
+            AgentDef,
+            RuntimeConfig,
+            ScriptStepDef,
+            WaitStepDef,
+            WorkflowConfig,
+            WorkflowDef,
+        )
 
         return WorkflowConfig(
             workflow=WorkflowDef(
@@ -1605,8 +1612,8 @@ class TestReplaySyntheticFromContext:
             ),
             agents=[
                 AgentDef(name="a", prompt="x", routes=[]),
-                AgentDef(name="s", type="script", command="echo hi", routes=[]),
-                AgentDef(name="w", type="wait", duration="5s", reason="cooldown", routes=[]),
+                ScriptStepDef(name="s", command="echo hi", routes=[]),
+                WaitStepDef(name="w", duration="5s", reason="cooldown", routes=[]),
             ],
         )
 

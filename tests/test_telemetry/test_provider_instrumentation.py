@@ -60,7 +60,6 @@ def native_tracing(monkeypatch: pytest.MonkeyPatch) -> Generator[NativeTracing, 
 def _agent_definition(name: str) -> AgentDef:
     return AgentDef(
         name=name,
-        max_depth=None,
         timeout_seconds=None,
         max_session_seconds=None,
         max_agent_iterations=None,

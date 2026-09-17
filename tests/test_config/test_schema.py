@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from conductor.config.schema import (
     AgentDef,
@@ -11,17 +11,39 @@ from conductor.config.schema import (
     ContextConfig,
     ForEachDef,
     GateOption,
+    HumanGateStepDef,
     InputDef,
     LimitsConfig,
     OutputField,
     ReasoningConfig,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
+    StepDef,
+    TerminateStepDef,
     ToolOutputConfig,
     ValidatorConfig,
+    WaitStepDef,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
+
+_STEP_DEF_ADAPTER = TypeAdapter(StepDef)
+
+
+def _assert_extra_forbidden(exc_info: pytest.ExceptionInfo[ValidationError], field: str) -> None:
+    """Assert the validation errors contain a standard extra_forbidden error for `field`.
+
+    Concrete step models use ``extra="forbid"`` to reject fields owned by sibling
+    variants, so the error is Pydantic's standard ``extra_forbidden`` type with the
+    field name as its location — asserted structurally, not by message text.
+    """
+    errors = exc_info.value.errors()
+    assert any(err["loc"] == (field,) and err["type"] == "extra_forbidden" for err in errors), (
+        f"Expected extra_forbidden error for {field!r}, got: {errors}"
+    )
 
 
 class TestInputDef:
@@ -550,7 +572,7 @@ class TestAgentDef:
         agent = AgentDef(name="agent1", model="gpt-4", prompt="Hello")
         assert agent.name == "agent1"
         assert agent.model == "gpt-4"
-        assert agent.type is None
+        assert agent.type == "agent"
         assert agent.routes == []
         assert agent.input == []
 
@@ -575,9 +597,8 @@ class TestAgentDef:
 
     def test_human_gate_with_options(self) -> None:
         """Test human_gate agent with options."""
-        agent = AgentDef(
+        agent = HumanGateStepDef(
             name="gate1",
-            type="human_gate",
             prompt="Choose an option:",
             options=[
                 GateOption(label="Yes", value="yes", route="next"),
@@ -590,15 +611,14 @@ class TestAgentDef:
     def test_human_gate_without_options_raises(self) -> None:
         """Test that human_gate without options raises ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="gate1", type="human_gate", prompt="Choose:")
+            HumanGateStepDef(name="gate1", prompt="Choose:")
         assert "options" in str(exc_info.value)
 
     def test_human_gate_without_prompt_raises(self) -> None:
         """Test that human_gate without prompt raises ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
+            HumanGateStepDef(
                 name="gate1",
-                type="human_gate",
                 options=[GateOption(label="Ok", value="ok", route="next")],
             )
         assert "prompt" in str(exc_info.value)
@@ -642,9 +662,8 @@ class TestAgentDefMaxSessionSeconds:
     def test_rejected_on_script_agent(self) -> None:
         """Test that script agents cannot have max_session_seconds."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
+            ScriptStepDef(
                 name="s",
-                type="script",
                 command="echo hello",
                 max_session_seconds=60.0,
             )
@@ -1430,7 +1449,10 @@ class TestForEachDef:
                 agent=AgentDef(name="a", model="gpt-4", prompt="test"),
                 max_concurrent=0,
             )
-        assert "must be at least 1" in str(exc_info.value)
+        assert any(
+            e["loc"] == ("max_concurrent",) and e["type"] == "greater_than_equal"
+            for e in exc_info.value.errors()
+        )
 
         # Too high
         with pytest.raises(ValidationError) as exc_info:
@@ -1442,7 +1464,10 @@ class TestForEachDef:
                 agent=AgentDef(name="a", model="gpt-4", prompt="test"),
                 max_concurrent=101,
             )
-        assert "cannot exceed 100" in str(exc_info.value)
+        assert any(
+            e["loc"] == ("max_concurrent",) and e["type"] == "less_than_equal"
+            for e in exc_info.value.errors()
+        )
 
         # Valid range
         for valid_max in [1, 10, 50, 100]:
@@ -1681,7 +1706,7 @@ class TestAgentDefReasoning:
     def test_default_agent_type_accepts_reasoning(self) -> None:
         """Test that default (None) agent type accepts reasoning."""
         agent = AgentDef(name="a", model="gpt-4", prompt="test", reasoning={"effort": "medium"})
-        assert agent.type is None
+        assert agent.type == "agent"
         assert agent.reasoning is not None
         assert agent.reasoning.effort == "medium"
 
@@ -1700,36 +1725,39 @@ class TestAgentDefReasoning:
     def test_human_gate_with_reasoning_raises(self) -> None:
         """Test that human_gate agents cannot have reasoning."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="gate1",
-                type="human_gate",
-                prompt="Choose:",
-                options=[GateOption(label="Ok", value="ok", route="next")],
-                reasoning={"effort": "low"},
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate1",
+                    "prompt": "Choose:",
+                    "options": [GateOption(label="Ok", value="ok", route="next")],
+                    "reasoning": {"effort": "low"},
+                }
             )
-        assert "human_gate agents cannot have 'reasoning'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "reasoning")
 
     def test_script_with_reasoning_raises(self) -> None:
         """Test that script agents cannot have reasoning."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="s",
-                type="script",
-                command="echo hello",
-                reasoning={"effort": "high"},
+            ScriptStepDef.model_validate(
+                {
+                    "name": "s",
+                    "command": "echo hello",
+                    "reasoning": {"effort": "high"},
+                }
             )
-        assert "script agents cannot have 'reasoning'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "reasoning")
 
     def test_workflow_with_reasoning_raises(self) -> None:
         """Test that workflow agents cannot have reasoning."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="w",
-                type="workflow",
-                workflow="./sub.yaml",
-                reasoning={"effort": "medium"},
+            WorkflowStepDef.model_validate(
+                {
+                    "name": "w",
+                    "workflow": "./sub.yaml",
+                    "reasoning": {"effort": "medium"},
+                }
             )
-        assert "workflow agents cannot have 'reasoning'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "reasoning")
 
 
 class TestAgentDefReasoningTemplating:
@@ -1792,14 +1820,15 @@ class TestAgentDefReasoningTemplating:
         A template string is still "not None", so the per-type ban applies.
         """
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="gate1",
-                type="human_gate",
-                prompt="Choose:",
-                options=[GateOption(label="Ok", value="ok", route="next")],
-                reasoning={"effort": "{{ workflow.input.eff }}"},
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate1",
+                    "prompt": "Choose:",
+                    "options": [GateOption(label="Ok", value="ok", route="next")],
+                    "reasoning": {"effort": "{{ workflow.input.eff }}"},
+                }
             )
-        assert "human_gate agents cannot have 'reasoning'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "reasoning")
 
 
 class TestAgentDefValidator:
@@ -1913,70 +1942,76 @@ class TestAgentDefValidator:
     def test_human_gate_with_validator_raises(self) -> None:
         """Test that human_gate agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="gate1",
-                type="human_gate",
-                prompt="Choose:",
-                options=[GateOption(label="Ok", value="ok", route="next")],
-                validator={"criteria": "Check"},
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate1",
+                    "prompt": "Choose:",
+                    "options": [GateOption(label="Ok", value="ok", route="next")],
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "human_gate agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
     def test_script_with_validator_raises(self) -> None:
         """Test that script agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="s",
-                type="script",
-                command="echo hello",
-                validator={"criteria": "Check"},
+            ScriptStepDef.model_validate(
+                {
+                    "name": "s",
+                    "command": "echo hello",
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "script agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
     def test_workflow_with_validator_raises(self) -> None:
         """Test that workflow agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="w",
-                type="workflow",
-                workflow="./sub.yaml",
-                validator={"criteria": "Check"},
+            WorkflowStepDef.model_validate(
+                {
+                    "name": "w",
+                    "workflow": "./sub.yaml",
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "workflow agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
     def test_wait_with_validator_raises(self) -> None:
         """Test that wait agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="w",
-                type="wait",
-                duration="5s",
-                validator={"criteria": "Check"},
+            WaitStepDef.model_validate(
+                {
+                    "name": "w",
+                    "duration": "5s",
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "wait agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
     def test_set_with_validator_raises(self) -> None:
         """Test that set agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="s",
-                type="set",
-                value="{{ workflow.input.x }}",
-                validator={"criteria": "Check"},
+            SetStepDef.model_validate(
+                {
+                    "name": "s",
+                    "value": "{{ workflow.input.x }}",
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "set agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
     def test_terminate_with_validator_raises(self) -> None:
         """Test that terminate agents cannot have validator."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="t",
-                type="terminate",
-                status="success",
-                reason="done",
-                validator={"criteria": "Check"},
+            TerminateStepDef.model_validate(
+                {
+                    "name": "t",
+                    "status": "success",
+                    "reason": "done",
+                    "validator": {"criteria": "Check"},
+                }
             )
-        assert "terminate agents cannot have 'validator'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "validator")
 
 
 class TestRuntimeConfigDefaultReasoningEffort:
@@ -2085,60 +2120,66 @@ class TestAgentDefContextTier:
     def test_human_gate_with_context_tier_raises(self) -> None:
         """Test that human_gate agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="g",
-                type="human_gate",
-                prompt="Approve?",
-                options=[GateOption(label="Ok", value="ok", route="next")],
-                context_tier="long_context",
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "g",
+                    "prompt": "Approve?",
+                    "options": [GateOption(label="Ok", value="ok", route="next")],
+                    "context_tier": "long_context",
+                }
             )
-        assert "human_gate agents cannot have 'context_tier'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "context_tier")
 
     def test_script_with_context_tier_raises(self) -> None:
         """Test that script agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="s",
-                type="script",
-                command="echo hi",
-                context_tier="long_context",
+            ScriptStepDef.model_validate(
+                {
+                    "name": "s",
+                    "command": "echo hi",
+                    "context_tier": "long_context",
+                }
             )
-        assert "script agents cannot have 'context_tier'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "context_tier")
 
     def test_workflow_with_context_tier_raises(self) -> None:
         """Test that workflow agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="w",
-                type="workflow",
-                workflow="./sub.yaml",
-                context_tier="long_context",
+            WorkflowStepDef.model_validate(
+                {
+                    "name": "w",
+                    "workflow": "./sub.yaml",
+                    "context_tier": "long_context",
+                }
             )
-        assert "workflow agents cannot have 'context_tier'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "context_tier")
 
     def test_wait_with_context_tier_raises(self) -> None:
         """Test that wait agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="w", type="wait", duration="1s", context_tier="long_context")
-        assert "wait agents cannot have 'context_tier'" in str(exc_info.value)
+            WaitStepDef.model_validate(
+                {"name": "w", "duration": "1s", "context_tier": "long_context"}
+            )
+        _assert_extra_forbidden(exc_info, "context_tier")
 
     def test_set_with_context_tier_raises(self) -> None:
         """Test that set agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="s", type="set", value="42", context_tier="long_context")
-        assert "set agents cannot have 'context_tier'" in str(exc_info.value)
+            SetStepDef.model_validate({"name": "s", "value": "42", "context_tier": "long_context"})
+        _assert_extra_forbidden(exc_info, "context_tier")
 
     def test_terminate_with_context_tier_raises(self) -> None:
         """Test that terminate agents cannot have context_tier."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="t",
-                type="terminate",
-                status="success",
-                reason="done",
-                context_tier="long_context",
+            TerminateStepDef.model_validate(
+                {
+                    "name": "t",
+                    "status": "success",
+                    "reason": "done",
+                    "context_tier": "long_context",
+                }
             )
-        assert "terminate agents cannot have 'context_tier'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "context_tier")
 
 
 class TestAgentDefContextTierTemplating:
@@ -2188,14 +2229,15 @@ class TestAgentDefContextTierTemplating:
         A template string is still "not None", so the per-type ban applies.
         """
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
-                name="g",
-                type="human_gate",
-                prompt="Approve?",
-                options=[GateOption(label="Ok", value="ok", route="next")],
-                context_tier="{{ workflow.input.tier }}",
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "g",
+                    "prompt": "Approve?",
+                    "options": [GateOption(label="Ok", value="ok", route="next")],
+                    "context_tier": "{{ workflow.input.tier }}",
+                }
             )
-        assert "human_gate agents cannot have 'context_tier'" in str(exc_info.value)
+        _assert_extra_forbidden(exc_info, "context_tier")
 
 
 class TestRuntimeConfigDefaultContextTier:
@@ -2366,16 +2408,15 @@ class TestTerminateAgent:
     """
 
     def test_valid_terminate_success(self) -> None:
-        a = AgentDef(name="ok", type="terminate", status="success", reason="done")
+        a = TerminateStepDef(name="ok", status="success", reason="done")
         assert a.type == "terminate"
         assert a.status == "success"
         assert a.reason == "done"
         assert a.output_template is None
 
     def test_valid_terminate_failed_with_output_template(self) -> None:
-        a = AgentDef(
+        a = TerminateStepDef(
             name="abort",
-            type="terminate",
             status="failed",
             reason="Refusing to run on unsafe input",
             output_template={"result": "aborted", "reason": "{{ precheck.output.reason }}"},
@@ -2388,29 +2429,28 @@ class TestTerminateAgent:
 
     def test_missing_status_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", reason="needed")
+            TerminateStepDef(name="x", reason="needed")
         assert "status" in str(exc_info.value).lower()
 
     def test_missing_reason_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success")
+            TerminateStepDef(name="x", status="success")
         assert "reason" in str(exc_info.value).lower()
 
     def test_empty_reason_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success", reason="   ")
+            TerminateStepDef(name="x", status="success", reason="   ")
         assert "reason" in str(exc_info.value).lower()
 
     def test_invalid_status_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            AgentDef(name="x", type="terminate", status="maybe", reason="x")
+            TerminateStepDef(name="x", status="maybe", reason="x")
 
     def test_routes_rejected_on_terminate(self) -> None:
         """Terminate ends the workflow; outbound routes would be unreachable."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
+            TerminateStepDef(
                 name="x",
-                type="terminate",
                 status="success",
                 reason="r",
                 routes=[RouteDef(to="$end")],
@@ -2419,15 +2459,14 @@ class TestTerminateAgent:
 
     def test_tools_rejected_on_terminate(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success", reason="r", tools=["foo"])
+            TerminateStepDef(name="x", status="success", reason="r", tools=["foo"])
         assert "tools" in str(exc_info.value).lower()
 
     def test_output_rejected_on_terminate(self) -> None:
         """`output:` is for agent schemas; terminate uses `output_template:` instead."""
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
+            TerminateStepDef(
                 name="x",
-                type="terminate",
                 status="success",
                 reason="r",
                 output={"k": OutputField(type="string")},
@@ -2436,24 +2475,23 @@ class TestTerminateAgent:
 
     def test_prompt_rejected_on_terminate(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success", reason="r", prompt="hi")
+            TerminateStepDef(name="x", status="success", reason="r", prompt="hi")
         assert "prompt" in str(exc_info.value).lower()
 
     def test_model_rejected_on_terminate(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success", reason="r", model="claude")
+            TerminateStepDef(name="x", status="success", reason="r", model="claude")
         assert "model" in str(exc_info.value).lower()
 
     def test_command_rejected_on_terminate(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(name="x", type="terminate", status="success", reason="r", command="echo")
+            TerminateStepDef(name="x", status="success", reason="r", command="echo")
         assert "command" in str(exc_info.value).lower()
 
     def test_workflow_rejected_on_terminate(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef(
+            TerminateStepDef(
                 name="x",
-                type="terminate",
                 status="success",
                 reason="r",
                 workflow="./sub.yaml",
@@ -2489,14 +2527,14 @@ class TestTerminateAgent:
     def test_terminate_fields_rejected_on_other_step_types(
         self, step_type: str, forbidden_field: str, field_value: object
     ) -> None:
-        """The terminate-only-fields guard must trip for every non-terminate type
-        and every terminate-exclusive field — not just `status`.
+        """The terminate-only fields must trip on every non-terminate variant.
 
-        Earlier iteration of this test only varied ``step_type`` and asserted on
-        ``status``. A bug in ``validate_agent_type`` that, say, rejected only
-        ``status`` on ``script`` agents but silently accepted ``reason`` and
-        ``output_template`` would have slipped through. Cross-product the
-        parametrisation so every (step_type, terminate-field) pair is exercised.
+        Validated through the ``StepDef`` union so the concrete variant — not
+        the LLM ``AgentDef`` — is what rejects the foreign field. The baseline
+        payload is asserted valid first: without that, the rejection below
+        could be caused by the variant simply not recognizing the payload at
+        all, and would keep passing even if the variant started accepting
+        terminate-only fields tomorrow.
         """
         payload: dict[str, object] = {"name": "a", "type": step_type}
         if step_type == "script":
@@ -2505,17 +2543,23 @@ class TestTerminateAgent:
             payload["workflow"] = "./sub.yaml"
         elif step_type == "human_gate":
             payload["prompt"] = "Pick"
-            payload["options"] = [GateOption(value="x", label="X", route="$end")]
+            payload["options"] = [{"value": "x", "label": "X", "route": "$end"}]
+
+        _STEP_DEF_ADAPTER.validate_python(payload)
+
         payload[forbidden_field] = field_value
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef.model_validate(payload)
-        assert forbidden_field in str(exc_info.value)
+            _STEP_DEF_ADAPTER.validate_python(payload)
+        errors = exc_info.value.errors()
+        assert any(
+            err["type"] == "extra_forbidden" and err["loc"] == (step_type, forbidden_field)
+            for err in errors
+        ), f"Expected extra_forbidden at ({step_type!r}, {forbidden_field!r}), got: {errors}"
 
     def test_input_allowed_on_terminate(self) -> None:
         """Terminate steps may declare context inputs to drive Jinja rendering."""
-        a = AgentDef(
+        a = TerminateStepDef(
             name="x",
-            type="terminate",
             status="success",
             reason="{{ precheck.output.reason }}",
             input=["precheck.output"],
@@ -2528,9 +2572,8 @@ class TestScriptStdinField:
 
     def test_stdin_accepted_on_script(self) -> None:
         """A script step may declare a stdin payload template."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="s",
-            type="script",
             command="cat",
             stdin="{{ upstream.output.evaluations | tojson }}",
         )
@@ -2538,35 +2581,38 @@ class TestScriptStdinField:
 
     def test_stdin_empty_string_accepted_on_script(self) -> None:
         """An explicit empty stdin is valid (pipes immediate EOF), distinct from omission."""
-        agent = AgentDef(name="s", type="script", command="cat", stdin="")
+        agent = ScriptStepDef(name="s", command="cat", stdin="")
         assert agent.stdin == ""
 
     def test_stdin_defaults_to_none(self) -> None:
         """Omitting stdin leaves it None (legacy inherit-stdin behavior)."""
-        agent = AgentDef(name="s", type="script", command="echo")
+        agent = ScriptStepDef(name="s", command="echo")
         assert agent.stdin is None
 
     @pytest.mark.parametrize(
-        "step_type",
-        ["agent", "human_gate", "set", "wait", "terminate", "workflow"],
+        "step_class,valid_kwargs",
+        [
+            (AgentDef, {"name": "a"}),
+            (
+                HumanGateStepDef,
+                {
+                    "prompt": "Pick",
+                    "options": [GateOption(value="x", label="X", route="$end")],
+                },
+            ),
+            (SetStepDef, {"value": "{{ 1 }}"}),
+            (WaitStepDef, {"duration": "1s"}),
+            (TerminateStepDef, {"status": "success", "reason": "r"}),
+            (WorkflowStepDef, {"workflow": "./sub.yaml"}),
+        ],
+        ids=["agent", "human_gate", "set", "wait", "terminate", "workflow"],
     )
-    def test_stdin_rejected_on_non_script_types(self, step_type: str) -> None:
-        """The script-exclusive guard trips for every non-script step type."""
-        payload: dict[str, object] = {"name": "a", "type": step_type, "stdin": "data"}
-        if step_type == "human_gate":
-            payload["prompt"] = "Pick"
-            payload["options"] = [GateOption(value="x", label="X", route="$end")]
-        elif step_type == "set":
-            payload["value"] = "{{ 1 }}"
-        elif step_type == "wait":
-            payload["duration"] = "1s"
-        elif step_type == "terminate":
-            payload["status"] = "success"
-            payload["reason"] = "r"
-        elif step_type == "workflow":
-            payload["workflow"] = "./sub.yaml"
+    def test_stdin_rejected_on_non_script_types(self, step_class: type, valid_kwargs: dict) -> None:
+        """The script-exclusive guard trips for every non-script step type.
+
+        ``stdin`` is a ScriptStepDef-only field; every sibling variant rejects it
+        via extra="forbid" (standard extra_forbidden error).
+        """
         with pytest.raises(ValidationError) as exc_info:
-            AgentDef.model_validate(payload)
-        message = str(exc_info.value)
-        assert "stdin" in message
-        assert "only 'script' agents support this field" in message
+            step_class.model_validate({"name": "a", "stdin": "data", **valid_kwargs})
+        _assert_extra_forbidden(exc_info, "stdin")

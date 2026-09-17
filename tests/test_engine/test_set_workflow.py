@@ -24,7 +24,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from conductor.config.schema import (
-    AgentDef,
     ContextConfig,
     ForEachDef,
     LimitsConfig,
@@ -32,6 +31,8 @@ from conductor.config.schema import (
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -66,9 +67,8 @@ class TestSetWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="compute",
-                    type="set",
                     value="{{ workflow.input.org }}/{{ workflow.input.repo }}",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -90,9 +90,8 @@ class TestSetWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="derive",
-                    type="set",
                     values={
                         "is_breaking": ("{{ workflow.input.severity in ['high', 'critical'] }}"),
                         "branch": "{{ workflow.input.branch or 'main' }}",
@@ -126,25 +125,22 @@ class TestSetWorkflowRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="flag",
-                    type="set",
                     values={"is_breaking": "{{ workflow.input.severity == 'high' }}"},
                     routes=[
                         RouteDef(to="breaking_path", when="{{ output.is_breaking }}"),
                         RouteDef(to="safe_path"),
                     ],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="breaking_path",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('breaking')"],
                     routes=[RouteDef(to="$end")],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="safe_path",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('safe')"],
                     routes=[RouteDef(to="$end")],
@@ -177,25 +173,22 @@ class TestSetWorkflowRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="flag",
-                    type="set",
                     value="{{ workflow.input.severity == 'high' }}",
                     routes=[
                         RouteDef(to="hi", when="{{ output }}"),
                         RouteDef(to="lo"),
                     ],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="hi",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('hi')"],
                     routes=[RouteDef(to="$end")],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="lo",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('lo')"],
                     routes=[RouteDef(to="$end")],
@@ -229,8 +222,8 @@ class TestSetInParallelGroup:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(name="left", type="set", value="{{ workflow.input.a }}"),
-                AgentDef(name="right", type="set", value="{{ workflow.input.b }}"),
+                SetStepDef(name="left", value="{{ workflow.input.a }}"),
+                SetStepDef(name="right", value="{{ workflow.input.b }}"),
             ],
             parallel=[
                 ParallelGroup(
@@ -261,8 +254,8 @@ class TestSetInParallelGroup:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(name="left", type="set", value="{{ workflow.input.a }}"),
-                AgentDef(name="right", type="set", value="{{ workflow.input.b }}"),
+                SetStepDef(name="left", value="{{ workflow.input.a }}"),
+                SetStepDef(name="right", value="{{ workflow.input.b }}"),
             ],
             parallel=[
                 ParallelGroup(
@@ -294,10 +287,9 @@ class TestSetInParallelGroup:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(name="ok", type="set", value="x"),
-                AgentDef(
+                SetStepDef(name="ok", value="x"),
+                SetStepDef(
                     name="bad",
-                    type="set",
                     value="hello",
                     output={"ok": OutputField(type="boolean")},
                 ),
@@ -329,9 +321,8 @@ class TestSetInForEach:
                 limits=LimitsConfig(max_iterations=20),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="setup",
-                    type="set",
                     values={"items": "{{ [1, 2, 3] }}"},
                     routes=[RouteDef(to="loop")],
                 ),
@@ -342,9 +333,8 @@ class TestSetInForEach:
                     type="for_each",
                     source="setup.output.items",
                     **{"as": "item"},
-                    agent=AgentDef(
+                    agent=SetStepDef(
                         name="binder",
-                        type="set",
                         value="item-{{ item }}",
                     ),
                     routes=[RouteDef(to="$end")],
@@ -368,9 +358,8 @@ class TestSetInForEach:
                 limits=LimitsConfig(max_iterations=20),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="setup",
-                    type="set",
                     values={"items": "{{ [1, 2, 3] }}"},
                     routes=[RouteDef(to="loop")],
                 ),
@@ -381,7 +370,7 @@ class TestSetInForEach:
                     type="for_each",
                     source="setup.output.items",
                     **{"as": "item"},
-                    agent=AgentDef(name="binder", type="set", value="item-{{ item }}"),
+                    agent=SetStepDef(name="binder", value="item-{{ item }}"),
                     routes=[RouteDef(to="$end")],
                 ),
             ],
@@ -411,9 +400,8 @@ class TestSetOutputSchemaValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     value="hello",
                     output={"ok": OutputField(type="boolean")},
                     routes=[RouteDef(to="$end")],
@@ -439,9 +427,8 @@ class TestSetOutputSchemaValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     values={"ok": "{{ true }}"},
                     output={"ok": OutputField(type="boolean")},
                     routes=[RouteDef(to="$end")],
@@ -463,9 +450,8 @@ class TestSetOutputSchemaValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     values={"ok": "{{ true }}"},
                     output={"missing": OutputField(type="boolean")},
                     routes=[RouteDef(to="$end")],
@@ -493,9 +479,8 @@ class TestSetOutputSchemaValidation:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     values={
                         "ok": "{{ true }}",
                         "extra": "{{ 42 }}",
@@ -527,9 +512,8 @@ class TestSetEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     values={"ok": "{{ true }}"},
                     routes=[RouteDef(to="$end")],
                 ),
@@ -559,9 +543,8 @@ class TestSetEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="bind",
-                    type="set",
                     value="{{ does_not_exist }}",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -592,15 +575,13 @@ class TestSetScalarFieldAccessErrors:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="compute",
-                    type="set",
                     value="myorg/myrepo",
                     routes=[RouteDef(to="consumer")],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="consumer",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; print(sys.argv[1])", "{{ compute.output.field }}"],
                     input=["compute.output.field"],
@@ -628,15 +609,13 @@ class TestSetIterationCounting:
                 limits=LimitsConfig(max_iterations=2),
             ),
             agents=[
-                AgentDef(
+                SetStepDef(
                     name="a",
-                    type="set",
                     value="x",
                     routes=[RouteDef(to="b")],
                 ),
-                AgentDef(
+                SetStepDef(
                     name="b",
-                    type="set",
                     value="y",
                     routes=[RouteDef(to="a")],
                 ),

@@ -35,7 +35,7 @@ def _verbose_log(message: str, style: str = "dim") -> None:
 
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef
+    from conductor.config.schema import WaitStepDef
 
 
 @dataclass
@@ -79,7 +79,7 @@ class WaitExecutor:
 
     async def execute(
         self,
-        agent: AgentDef,
+        agent: WaitStepDef,
         context: dict[str, Any],
         interrupt_event: asyncio.Event | None = None,
     ) -> WaitOutput:

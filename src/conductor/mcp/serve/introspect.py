@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from conductor.config.loader import load_config
+from conductor.config.schema import RoutableStepBase
 from conductor.fleet.records import RunRecord
 from conductor.fleet.summary import derive_step_detail
 from conductor.mcp.serve.runs import RunLookup, read_event_log_events, resolve_run
@@ -420,8 +421,8 @@ def _build_plan_tree(config: WorkflowConfig) -> dict[str, Any]:
         nodes.append(
             {
                 "name": agent.name,
-                "type": agent.type or "agent",
-                "routes": _route_dicts(agent.routes),
+                "type": agent.type,
+                "routes": _route_dicts(agent.routes) if isinstance(agent, RoutableStepBase) else [],
             }
         )
     for group in config.parallel:

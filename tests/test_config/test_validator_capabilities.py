@@ -9,11 +9,15 @@ import pytest
 from conductor.config.schema import (
     AgentDef,
     ForEachDef,
+    HumanGateStepDef,
     MCPServerDef,
     OutputField,
     ParallelGroup,
     ReasoningConfig,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
+    StepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -46,7 +50,7 @@ def _caps(**overrides: object) -> ProviderCapabilities:
 
 def _build_workflow(
     *,
-    agents: list[AgentDef],
+    agents: list[StepDef],
     parallel: list[ParallelGroup] | None = None,
     for_each: list[ForEachDef] | None = None,
     mcp_servers: dict[str, MCPServerDef] | None = None,
@@ -80,7 +84,7 @@ def _build_workflow(
 
 def _for_each_workflow(
     *,
-    inline: AgentDef,
+    inline: StepDef,
     tools: list[str] | None = None,
     mcp_servers: dict[str, MCPServerDef] | None = None,
     skills: list[str] | None = None,
@@ -477,7 +481,7 @@ class TestForEachInlineToolsCrossCheck:
     def _for_each_config(
         self,
         *,
-        inline: AgentDef,
+        inline: StepDef,
         tools: list[str] | None = None,
     ) -> WorkflowConfig:
         # The entry agent opts out with ``tools: []`` so only the inline agent
@@ -499,7 +503,7 @@ class TestForEachInlineToolsCrossCheck:
     def _for_each_mcp_config(
         self,
         *,
-        inline: AgentDef,
+        inline: StepDef,
         mcp_servers: dict[str, MCPServerDef] | None = None,
     ) -> WorkflowConfig:
         # The entry agent OMITS ``tools:`` (and there is no workflow-level
@@ -858,9 +862,8 @@ class TestNonLLMAgentsSkipped:
         patch_caps({"copilot": _caps(mcp_tools=False, concurrent_safe=False)})
         config = _build_workflow(
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="a",
-                    type="script",
                     command="echo hi",
                 )
             ],
@@ -875,9 +878,8 @@ class TestNonLLMAgentsSkipped:
         patch_caps({"copilot": _caps(reasoning_effort=None)})
         config = _build_workflow(
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(label="OK", value="ok", route="$end"),
@@ -1388,7 +1390,7 @@ class TestForEachInlineWorkflowLevelInheritance:
     def _inheritance_config(
         self,
         *,
-        inline: AgentDef,
+        inline: StepDef,
         runtime: RuntimeConfig,
     ) -> WorkflowConfig:
         # ``entry`` overrides to a capable provider so, WITHOUT the fix, the
@@ -1477,17 +1479,21 @@ class TestForEachInlineWorkflowLevelInheritance:
         )
         validate_workflow_config(config)  # no raise
 
-    def test_inline_non_llm_human_gate_skipped(self, patch_caps: Any) -> None:
-        """A non-LLM (human_gate) inline agent must be SKIPPED by the
-        ``_is_llm_agent`` filter — even on an incapable default provider that
-        declares ``mcp_servers``, ``max_session_seconds``, AND
+    def test_inline_non_llm_set_step_skipped(self, patch_caps: Any) -> None:
+        """A non-LLM inline step must be SKIPPED by the ``_is_llm_agent``
+        filter — even on an incapable default provider that declares
+        ``mcp_servers``, ``max_session_seconds``, AND
         ``default_reasoning_effort`` that an LLM inline agent WOULD inherit and
         fail on. Guards the inline ``_is_llm_agent`` guard (feeding
         ``all_llm_agents`` and the for_each per-agent loop) against a future
         refactor that drops it and spuriously fail-validates the workflow.
-        """
-        from conductor.config.schema import GateOption
 
+        Uses a ``set`` step as the inline agent: under the step-model
+        architecture a human gate is no longer permitted as a for_each inline
+        agent at all (concurrent iterations would compete for one interactive
+        gate channel), so the non-LLM skip is exercised through the remaining
+        non-LLM inline-able variant.
+        """
         patch_caps(
             {
                 # Default provider is incapable on all three inherited axes;
@@ -1497,15 +1503,7 @@ class TestForEachInlineWorkflowLevelInheritance:
             }
         )
         config = self._inheritance_config(
-            inline=AgentDef(
-                name="gate",
-                type="human_gate",
-                prompt="Approve {{ item }}?",
-                options=[
-                    GateOption(label="OK", value="ok", route="$end"),
-                    GateOption(label="No", value="no", route="$end"),
-                ],
-            ),
+            inline=SetStepDef(name="derive", value="{{ item }}"),
             runtime=RuntimeConfig(
                 provider="copilot",
                 default_reasoning_effort="high",
@@ -1513,7 +1511,7 @@ class TestForEachInlineWorkflowLevelInheritance:
                 mcp_servers={"docs": MCPServerDef(command="docs-server")},
             ),
         )
-        validate_workflow_config(config)  # must not raise — human_gate is skipped
+        validate_workflow_config(config)  # must not raise — set step is skipped
 
 
 class TestWorkingDirCrossCheck:
@@ -1634,7 +1632,7 @@ class TestWorkingDirCrossCheck:
         capability gate must not fire for them even with working_dir set."""
         patch_caps({"copilot": _caps(working_dir=False)})
         config = _build_workflow(
-            agents=[AgentDef(name="s", type="script", command="ls", working_dir="/tmp")],
+            agents=[ScriptStepDef(name="s", command="ls", working_dir="/tmp")],
         )
         validate_workflow_config(config)  # no raise
 
@@ -1656,7 +1654,7 @@ class TestAcaRealCapabilitiesCrossCheck:
     def _aca_workflow(
         self,
         *,
-        agents: list[AgentDef],
+        agents: list[StepDef],
         mcp_servers: dict[str, MCPServerDef] | None = None,
     ) -> WorkflowConfig:
         from conductor.config.schema import ProviderSettings
@@ -1770,7 +1768,7 @@ class TestClaudeAgentSdkRealCapabilitiesCrossCheck:
     def _sdk_workflow(
         self,
         *,
-        agents: list[AgentDef],
+        agents: list[StepDef],
         mcp_servers: dict[str, MCPServerDef] | None = None,
         working_dir: str | None = None,
     ) -> WorkflowConfig:
@@ -1953,7 +1951,7 @@ class TestAcaSkillsRealCapabilities:
     literal), so it is set via ``runtime.provider``.
     """
 
-    def _aca_workflow(self, *, agents: list[AgentDef], skills: list[str] | None = None):
+    def _aca_workflow(self, *, agents: list[StepDef], skills: list[str] | None = None):
         from conductor.config.schema import ProviderSettings
 
         runtime_kwargs: dict[str, Any] = {

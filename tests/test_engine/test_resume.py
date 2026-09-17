@@ -450,6 +450,84 @@ class TestFullRoundTrip:
     """Test the complete flow: run → fail → checkpoint → resume → success."""
 
     @pytest.mark.asyncio
+    async def test_round_trip_with_legacy_yaml_without_type(self, tmp_path: Path) -> None:
+        # Requirement: a pre-#517 workflow file whose LLM agents declare no
+        # ``type`` runs, checkpoints, and — reloaded by the resume path —
+        # still parses every agent as a canonical ``AgentDef(type="agent")``.
+        from conductor.config.loader import load_config
+
+        wf_path = _write_workflow(
+            tmp_path,
+            """\
+workflow:
+  name: legacy-roundtrip
+  entry_point: planner
+agents:
+  - name: planner
+    model: gpt-4
+    prompt: "Plan: {{ workflow.input.topic }}"
+    output:
+      plan: { type: string }
+    routes:
+      - to: researcher
+  - name: researcher
+    model: gpt-4
+    prompt: "Research: {{ planner.output.plan }}"
+    output:
+      findings: { type: string }
+    routes:
+      - to: $end
+output:
+  findings: "{{ researcher.output.findings }}"
+""",
+        )
+        config = load_config(wf_path)
+        assert all(type(a) is AgentDef and a.type == "agent" for a in config.agents)
+
+        calls = {"researcher": 0}
+
+        def failing_handler(agent, prompt, context):
+            if agent.name == "planner":
+                return {"plan": "research AI topics"}
+            calls["researcher"] += 1
+            if calls["researcher"] == 1:
+                raise ProviderError("Temporary network error")
+            return {"findings": "comprehensive findings"}
+
+        provider = CopilotProvider(mock_handler=failing_handler)
+        engine = WorkflowEngine(config, provider, workflow_path=wf_path)
+
+        with (
+            patch.object(CheckpointManager, "get_checkpoints_dir", return_value=tmp_path),
+            pytest.raises(ProviderError, match="Temporary network"),
+        ):
+            await engine.run({"topic": "AI"})
+
+        checkpoint_path = engine._last_checkpoint_path
+        assert checkpoint_path is not None
+        cp = CheckpointManager.load_checkpoint(checkpoint_path)
+
+        # The resume CLI path re-parses the workflow file from disk.
+        reloaded = load_config(wf_path)
+        assert all(type(a) is AgentDef and a.type == "agent" for a in reloaded.agents)
+
+        engine2 = WorkflowEngine(reloaded, provider, workflow_path=wf_path)
+        engine2.set_context(WorkflowContext.from_dict(cp.context))
+        engine2.set_limits(
+            LimitEnforcer.from_dict(
+                cp.limits,
+                timeout_seconds=config.workflow.limits.timeout_seconds,
+                budget_usd=config.workflow.limits.budget_usd,
+                budget_mode=config.workflow.limits.budget_mode,
+            )
+        )
+
+        with patch.object(CheckpointManager, "get_checkpoints_dir", return_value=tmp_path):
+            result = await engine2.resume(cp.current_agent)
+
+        assert result["findings"] == "comprehensive findings"
+
+    @pytest.mark.asyncio
     async def test_round_trip_checkpoint_and_resume(self, tmp_path: Path) -> None:
         """Full round-trip: run fails, checkpoint saved, resume succeeds."""
         wf_path = _write_workflow(tmp_path, "name: multi-agent\n")

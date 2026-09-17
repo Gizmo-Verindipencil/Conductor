@@ -968,6 +968,7 @@ def show(
 
     try:
         from conductor.config.loader import load_config as load_workflow_config
+        from conductor.config.schema import RoutableStepBase
 
         config = load_workflow_config(workflow_path)
     except Exception as e:
@@ -1015,9 +1016,12 @@ def show(
     agent_table.add_column("Routes")
 
     for agent in config.agents:
-        agent_type = agent.type or "agent"
-        routes = ", ".join(r.to + (f" (when {r.when})" if r.when else "") for r in agent.routes)
-        agent_table.add_row(agent.name, agent_type, agent.description or "-", routes or "-")
+        agent_routes = (
+            ", ".join(r.to + (f" (when {r.when})" if r.when else "") for r in agent.routes)
+            if isinstance(agent, RoutableStepBase)
+            else ""
+        )
+        agent_table.add_row(agent.name, agent.type, agent.description or "-", agent_routes or "-")
 
     # Include parallel groups
     for pg in config.parallel:

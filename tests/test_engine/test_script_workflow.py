@@ -28,6 +28,7 @@ from conductor.config.schema import (
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -52,9 +53,8 @@ class TestScriptWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="run_echo",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('hello world')"],
                     routes=[RouteDef(to="$end")],
@@ -83,9 +83,8 @@ class TestScriptWorkflowLinear:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="checker",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('test output')"],
                     routes=[RouteDef(to="processor")],
@@ -131,9 +130,8 @@ class TestScriptRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="checker",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; sys.exit(0)"],
                     routes=[
@@ -176,9 +174,8 @@ class TestScriptRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="checker",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; sys.exit(1)"],
                     routes=[
@@ -221,9 +218,8 @@ class TestScriptRouting:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="checker",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; sys.exit(0)"],
                     routes=[
@@ -270,16 +266,14 @@ class TestScriptLimits:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="step1",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('step1')"],
                     routes=[RouteDef(to="step2")],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="step2",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('step2')"],
                     routes=[RouteDef(to="$end")],
@@ -306,9 +300,8 @@ class TestScriptLimits:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="failing",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; sys.exit(1)"],
                 ),
@@ -341,9 +334,8 @@ class TestScriptMixed:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="setup_script",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('setup complete')"],
                     routes=[RouteDef(to="analyzer")],
@@ -384,9 +376,8 @@ class TestScriptTemplating:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="runner",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "import sys; print(sys.argv[1])", "{{ workflow.input.message }}"],
                     routes=[RouteDef(to="$end")],
@@ -418,9 +409,8 @@ class TestScriptDryRun:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="setup",
-                    type="script",
                     command="echo",
                     args=["init"],
                     routes=[RouteDef(to="$end")],
@@ -459,7 +449,7 @@ class TestScriptInParallelRejected:
             ),
             agents=[
                 AgentDef(name="agent_a", prompt="do something", routes=[RouteDef(to="$end")]),
-                AgentDef(name="script_b", type="script", command="echo"),
+                ScriptStepDef(name="script_b", command="echo"),
             ],
             parallel=[
                 ParallelGroup(
@@ -495,9 +485,8 @@ class TestScriptJsonStdout:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="detector",
-                    type="script",
                     command=sys.executable,
                     args=args,
                     routes=[RouteDef(to="$end")],
@@ -517,9 +506,8 @@ class TestScriptJsonStdout:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="detector",
-                    type="script",
                     command=sys.executable,
                     args=[
                         "-c",
@@ -531,9 +519,8 @@ class TestScriptJsonStdout:
                         RouteDef(to="$end"),
                     ],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="planner",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('done')"],
                     routes=[RouteDef(to="$end")],
@@ -626,9 +613,8 @@ class TestScriptOutputSchema:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="detector",
-                    type="script",
                     command=sys.executable,
                     args=args,
                     output=output,
@@ -963,9 +949,8 @@ class TestScriptOutputSchema:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="detector",
-                    type="script",
                     command=sys.executable,
                     args=[
                         "-c",
@@ -977,9 +962,8 @@ class TestScriptOutputSchema:
                         RouteDef(to="$end"),
                     ],
                 ),
-                AgentDef(
+                ScriptStepDef(
                     name="planner",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('planning done')"],
                     routes=[RouteDef(to="$end")],
@@ -1017,9 +1001,8 @@ class TestScriptStdinWorkflow:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="consume",
-                    type="script",
                     command=sys.executable,
                     args=["-c", reader],
                     stdin="{{ workflow.input.payload | tojson }}",
@@ -1060,9 +1043,8 @@ class TestScriptStdinWorkflow:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="sizer",
-                    type="script",
                     command=sys.executable,
                     args=["-c", reader],
                     stdin="{{ workflow.input.blob }}",

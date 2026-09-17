@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from conductor.config.schema import AgentDef, GateOption, RetryPolicy
+from conductor.config.schema import (
+    AgentDef,
+    HumanGateStepDef,
+    RetryPolicy,
+    ScriptStepDef,
+)
 from conductor.exceptions import ProviderError
 from conductor.exceptions import TimeoutError as _ConductorTimeoutError
 from conductor.providers.copilot import CopilotProvider, RetryConfig
@@ -140,28 +145,38 @@ class TestAgentDefRetry:
 
     def test_script_agent_cannot_have_retry(self) -> None:
         """Test that script agents cannot have a retry policy."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'retry'"):
-            AgentDef(
-                name="my_script",
-                type="script",
-                command="echo hello",
-                retry=RetryPolicy(max_attempts=3),
+        with pytest.raises(ValidationError) as exc_info:
+            ScriptStepDef.model_validate(
+                {
+                    "name": "my_script",
+                    "command": "echo hello",
+                    "retry": {"max_attempts": 3},
+                }
             )
-
-    def test_human_gate_can_have_retry_since_unused(self) -> None:
-        """Test that human_gate agents can technically have retry field.
-
-        The retry policy is only used by provider-backed agents, so
-        human_gate agents can have it without error (it simply won't be used).
-        """
-        agent = AgentDef(
-            name="gate",
-            type="human_gate",
-            prompt="Choose",
-            options=[GateOption(label="Yes", value="yes", route="next_agent")],
-            retry=RetryPolicy(max_attempts=2),
+        assert any(
+            e["loc"] == ("retry",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
         )
-        assert agent.retry is not None
+
+    def test_human_gate_rejects_retry(self) -> None:
+        """Test that human_gate agents cannot declare a retry policy.
+
+        Only provider-backed agents (AgentDef) own the retry field after the
+        step-model split; on every other step type it is an extra field.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate",
+                    "prompt": "Choose",
+                    "options": [{"label": "Yes", "value": "yes", "route": "next_agent"}],
+                    "retry": {"max_attempts": 2},
+                }
+            )
+        assert any(
+            e["loc"] == ("retry",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 # ---------------------------------------------------------------------------

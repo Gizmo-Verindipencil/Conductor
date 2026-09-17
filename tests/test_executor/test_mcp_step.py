@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from conductor.config.schema import AgentDef
+from conductor.config.schema import MCPStepDef
 from conductor.exceptions import ExecutionError
 from conductor.executor.mcp_step import McpStepExecutor, mcp_result_bytes
 from conductor.file_string import FileString
@@ -62,11 +62,11 @@ def executor() -> McpStepExecutor:
     return McpStepExecutor()
 
 
-def make_agent(**overrides: Any) -> AgentDef:
+def make_agent(**overrides: Any) -> MCPStepDef:
     """Build an mcp AgentDef with sensible defaults, overridden per test."""
     kwargs: dict[str, Any] = {"name": "lookup", "type": "mcp", "server": "srv", "tool": "ping"}
     kwargs.update(overrides)
-    return AgentDef(**kwargs)
+    return MCPStepDef(**kwargs)
 
 
 class TestArgumentRendering:

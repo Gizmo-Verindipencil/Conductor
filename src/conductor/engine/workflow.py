@@ -21,6 +21,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from conductor.config.schema import (
+    AgentDef,
+    HumanGateStepDef,
+    MCPStepDef,
+    QuestionsStepDef,
+    RoutableStepBase,
+    ScriptStepDef,
+    SetStepDef,
+    TerminateStepDef,
+    WaitStepDef,
+    WorkflowStepDef,
+)
 from conductor.duration import parse_duration
 from conductor.engine.checkpoint import CheckpointManager, CheckpointTrigger
 from conductor.engine.context import WorkflowContext
@@ -89,10 +101,10 @@ if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
 
     from conductor.config.schema import (
-        AgentDef,
         ForEachDef,
         ParallelGroup,
         ProviderName,
+        StepDef,
         WorkflowConfig,
     )
     from conductor.interrupt.listener import KeyboardListener
@@ -1317,7 +1329,7 @@ class WorkflowEngine:
             agents_out: list[dict[str, Any]] = []
             for a in sub_config.agents:
                 entry: dict[str, Any] = {"name": a.name, "type": a.type or "agent"}
-                if a.type == "workflow" and a.workflow:
+                if isinstance(a, WorkflowStepDef):
                     entry["subworkflow"] = await self._build_static_subworkflow_topology(
                         a.workflow, a.name, next_base_dir, depth + 1, next_visited
                     )
@@ -1336,12 +1348,12 @@ class WorkflowEngine:
                 "routes": [
                     {"from": a.name, "to": r.to, "when": r.when}
                     for a in sub_config.agents
-                    for r in a.routes
+                    for r in getattr(a, "routes", [])
                 ]
                 + [
                     {"from": a.name, "to": o.route, "when": f"selection == '{o.value}'"}
                     for a in sub_config.agents
-                    if a.type == "human_gate" and a.options
+                    if isinstance(a, HumanGateStepDef)
                     for o in a.options
                 ]
                 + [
@@ -1404,7 +1416,7 @@ class WorkflowEngine:
         def _provider_for(agent_name: str) -> str:
             for agent in self.config.agents:
                 if agent.name == agent_name:
-                    return agent.provider or default_provider_name
+                    return getattr(agent, "provider", None) or default_provider_name
             return default_provider_name
 
         def _record_provider(name: str) -> None:
@@ -1458,9 +1470,9 @@ class WorkflowEngine:
         # badge appears for for_each-only experimental providers.
         _record_provider(default_provider_name)
         for a in self.config.agents:
-            _record_provider(a.provider or default_provider_name)
+            _record_provider(getattr(a, "provider", None) or default_provider_name)
         for fe in self.config.for_each:
-            _record_provider(fe.agent.provider or default_provider_name)
+            _record_provider(getattr(fe.agent, "provider", None) or default_provider_name)
 
         # Base dir for eager sub-workflow resolution (relative `workflow:`
         # paths are resolved against the parent workflow file's directory).
@@ -1476,17 +1488,23 @@ class WorkflowEngine:
             entry: dict[str, Any] = {
                 "name": a.name,
                 "type": a.type or "agent",
-                "model": a.model,
+                "model": getattr(a, "model", None),
                 # Provider that this agent will actually use at runtime
                 # — populated for every agent (including non-LLM types
                 # for consistency; consumers can filter on `type`).
                 "provider_name": _provider_for(a.name),
                 "reasoning_effort": (
-                    a.reasoning.effort if a.reasoning is not None else default_effort
+                    a.reasoning.effort
+                    if isinstance(a, AgentDef) and a.reasoning is not None
+                    else default_effort
                 ),
-                "context_tier": (a.context_tier if a.context_tier is not None else default_tier),
+                "context_tier": (
+                    a.context_tier
+                    if isinstance(a, AgentDef) and a.context_tier is not None
+                    else default_tier
+                ),
             }
-            if a.type == "workflow" and a.workflow:
+            if isinstance(a, WorkflowStepDef):
                 # Eagerly resolve the sub-workflow's topology so the
                 # dashboard can render it (and let the user expand it)
                 # before the engine ever reaches this step. Best-effort:
@@ -1528,7 +1546,7 @@ class WorkflowEngine:
                     "when": r.when,
                 }
                 for a in self.config.agents
-                for r in a.routes
+                for r in getattr(a, "routes", [])
             ]
             + [
                 {
@@ -1537,7 +1555,7 @@ class WorkflowEngine:
                     "when": f"selection == '{o.value}'",
                 }
                 for a in self.config.agents
-                if a.type == "human_gate" and a.options
+                if isinstance(a, HumanGateStepDef)
                 for o in a.options
             ]
             + [
@@ -1720,7 +1738,7 @@ class WorkflowEngine:
                 suggestion="Provide either a provider or registry to WorkflowEngine",
             )
 
-    async def _execute_script(self, agent: AgentDef, context: dict[str, Any]) -> ScriptOutput:
+    async def _execute_script(self, agent: ScriptStepDef, context: dict[str, Any]) -> ScriptOutput:
         """Execute a script step with workflow-level timeout enforcement.
 
         Args:
@@ -1738,7 +1756,7 @@ class WorkflowEngine:
             operation_name=f"script '{agent.name}'",
         )
 
-    async def _execute_wait(self, agent: AgentDef, context: dict[str, Any]) -> WaitOutput:
+    async def _execute_wait(self, agent: WaitStepDef, context: dict[str, Any]) -> WaitOutput:
         """Execute a wait step with workflow-level timeout enforcement.
 
         The wait races ``asyncio.sleep`` against the engine's
@@ -1764,7 +1782,7 @@ class WorkflowEngine:
             operation_name=f"wait '{agent.name}'",
         )
 
-    async def _run_set_step(self, agent: AgentDef, agent_context: dict[str, Any]) -> SetOutput:
+    async def _run_set_step(self, agent: SetStepDef, agent_context: dict[str, Any]) -> SetOutput:
         """Execute a set step end-to-end with full event + validation parity.
 
         Shared between the main dispatch loop, parallel groups, and
@@ -1852,7 +1870,7 @@ class WorkflowEngine:
 
     async def _run_mcp_step(
         self,
-        agent: AgentDef,
+        agent: MCPStepDef,
         agent_context: dict[str, Any],
         *,
         event_fields: Mapping[str, Any] | None = None,
@@ -2179,7 +2197,7 @@ class WorkflowEngine:
         return path
 
     async def _invoke_mcp_interruptible(
-        self, agent: AgentDef, invocation: Coroutine[Any, Any, dict[str, Any]]
+        self, agent: MCPStepDef, invocation: Coroutine[Any, Any, dict[str, Any]]
     ) -> dict[str, Any]:
         """Race an mcp slot/connect/call invocation against a user Stop.
 
@@ -2218,7 +2236,7 @@ class WorkflowEngine:
 
     def _validate_script_output_schema(
         self,
-        agent: AgentDef,
+        agent: ScriptStepDef,
         parsed_json: Any,
         json_parse_error: Exception | None,
         output_content: dict[str, Any],
@@ -2331,7 +2349,7 @@ class WorkflowEngine:
 
     def _build_subworkflow_inputs(
         self,
-        agent: AgentDef,
+        agent: WorkflowStepDef,
         context: dict[str, Any],
     ) -> dict[str, Any]:
         """Build sub-workflow inputs from an agent's input_mapping or defaults.
@@ -2532,7 +2550,7 @@ class WorkflowEngine:
 
     async def _execute_subworkflow(
         self,
-        agent: AgentDef,
+        agent: WorkflowStepDef,
         context: dict[str, Any],
         slot_key: str | None = None,
     ) -> dict[str, Any]:
@@ -2665,7 +2683,7 @@ class WorkflowEngine:
 
     async def _execute_subworkflow_with_inputs(
         self,
-        agent: AgentDef,
+        agent: WorkflowStepDef,
         sub_inputs: dict[str, Any],
         slot_key: str | None = None,
     ) -> tuple[dict[str, Any], WorkflowUsage]:
@@ -2892,7 +2910,7 @@ class WorkflowEngine:
         self,
         child_engine: WorkflowEngine,
         sub_inputs: dict[str, Any],
-        agent: AgentDef,
+        agent: WorkflowStepDef,
     ) -> dict[str, Any]:
         """Run a child sub-workflow engine and convert child-level termination.
 
@@ -3720,7 +3738,7 @@ class WorkflowEngine:
         if self._keyboard_listener is not None:
             await self._keyboard_listener.resume()
 
-    async def _run_questions_step(self, agent: AgentDef) -> dict[str, Any]:
+    async def _run_questions_step(self, agent: QuestionsStepDef) -> dict[str, Any]:
         """Present a set of questions to a human and collect their answers.
 
         Runs the whole cursor loop inside one engine step (issue #376).
@@ -3832,7 +3850,7 @@ class WorkflowEngine:
 
     async def _run_questions_loop(
         self,
-        agent: AgentDef,
+        agent: QuestionsStepDef,
         order: list[questions_mod.ResolvedQuestion],
         records: dict[str, questions_mod.AnswerRecord],
         intro: str | None,
@@ -4058,7 +4076,7 @@ class WorkflowEngine:
 
     def _store_questions_progress(
         self,
-        agent: AgentDef,
+        agent: QuestionsStepDef,
         records: dict[str, questions_mod.AnswerRecord],
         order: list[questions_mod.ResolvedQuestion],
     ) -> None:
@@ -4142,7 +4160,7 @@ class WorkflowEngine:
 
     async def _handle_gate_with_web(
         self,
-        agent: AgentDef,
+        agent: HumanGateStepDef,
         agent_context: dict[str, Any],
     ) -> GateResult:
         """Handle a ``human_gate``, mapping the shared prompt back onto routes.
@@ -5312,16 +5330,17 @@ class WorkflowEngine:
                         )
 
                         # Resolve working_dir / settings_dir for provider-backed LLM agents
-                        # (type None/"agent"). wait/set/terminate/human_gate/
+                        # (type "agent"). wait/set/terminate/human_gate/
                         # workflow are schema-rejected from declaring one, and
                         # script resolves its own in ScriptExecutor.
-                        is_llm_agent = agent.type in (None, "agent")
-                        resolved_agent = (
-                            self._resolve_agent_working_dir(agent, agent_context)
-                            if is_llm_agent
-                            else agent
+                        resolved_agent: AgentDef | None = None
+                        if isinstance(agent, AgentDef):
+                            resolved_agent = self._resolve_agent_working_dir(agent, agent_context)
+                        event_provider = (
+                            self._provider_name_for(resolved_agent)
+                            if resolved_agent is not None
+                            else self.config.workflow.runtime.provider.name
                         )
-                        event_provider = self._provider_name_for(resolved_agent)
 
                         # Only an LLM agent has a context window to report, and
                         # asking for one *constructs the provider* — an SDK
@@ -5335,15 +5354,15 @@ class WorkflowEngine:
                         started_payload: dict[str, Any] = {
                             "agent_name": agent.name,
                             "iteration": agent_execution_count,
-                            "agent_type": agent.type or "agent",
+                            "agent_type": agent.type,
                             "provider": event_provider,
                             "context_window_max": (
                                 await self._get_context_window_for_agent(resolved_agent)
-                                if is_llm_agent
+                                if resolved_agent is not None
                                 else None
                             ),
                         }
-                        if is_llm_agent:
+                        if resolved_agent is not None:
                             started_payload["working_dir"] = resolved_agent.working_dir
                             # Emitted alongside working_dir because it is a
                             # trust decision: settings_dir loads another
@@ -5364,7 +5383,7 @@ class WorkflowEngine:
                         # is a terminate ends immediately on dispatch). The
                         # engine ends the workflow on this branch — no routes
                         # evaluated after.
-                        if agent.type == "terminate":
+                        if isinstance(agent, TerminateStepDef):
                             terminate_elapsed = _time.time() - _workflow_start
                             # Render the reason against context first so the
                             # rendered value is available to output_template
@@ -5474,7 +5493,7 @@ class WorkflowEngine:
                             )
 
                         # Handle human gates
-                        if agent.type == "human_gate":
+                        if isinstance(agent, HumanGateStepDef):
                             # Build context for the gate prompt
                             agent_context = self.context.get_for_template()
 
@@ -5552,7 +5571,7 @@ class WorkflowEngine:
                         # Handle questions steps. N human prompts inside ONE
                         # engine step, so the cursor can move backwards and the
                         # node costs 1 iteration rather than 2N.
-                        if agent.type == "questions":
+                        if isinstance(agent, QuestionsStepDef):
                             questions_output = await self._run_questions_step(agent)
                             self.context.store(agent.name, questions_output)
                             self.limits.record_execution(agent.name)
@@ -5589,7 +5608,7 @@ class WorkflowEngine:
                             continue
 
                         # Handle script steps
-                        if agent.type == "script":
+                        if isinstance(agent, ScriptStepDef):
                             _script_start = _time.time()
 
                             # Count how many times this specific script has been executed
@@ -5731,7 +5750,7 @@ class WorkflowEngine:
                             continue
 
                         # Handle wait steps
-                        if agent.type == "wait":
+                        if isinstance(agent, WaitStepDef):
                             _wait_start = _time.time()
 
                             wait_execution_count = (
@@ -5866,7 +5885,7 @@ class WorkflowEngine:
 
                         # Handle set steps. Pure context transformations:
                         # render, coerce, validate, emit, route.
-                        if agent.type == "set":
+                        if isinstance(agent, SetStepDef):
                             set_output = await self._run_set_step(agent, agent_context)
                             self.context.store(agent.name, set_output.value)
                             self.limits.record_execution(agent.name)
@@ -5917,7 +5936,7 @@ class WorkflowEngine:
                         # result envelope (with merged structured keys) lands
                         # in context like set/script outputs, so routing on
                         # e.g. ``output.is_error`` works unchanged.
-                        if agent.type == "mcp":
+                        if isinstance(agent, MCPStepDef):
                             try:
                                 mcp_envelope = await self._run_mcp_step(
                                     agent, agent_context, allow_interrupt=True
@@ -5996,7 +6015,7 @@ class WorkflowEngine:
                             continue
 
                         # Handle sub-workflow steps
-                        if agent.type == "workflow":
+                        if isinstance(agent, WorkflowStepDef):
                             _sub_start = _time.time()
 
                             sub_execution_count = (
@@ -6086,6 +6105,13 @@ class WorkflowEngine:
                         # agent_started. Subsequent model_copy(update={...}) calls
                         # inside AgentExecutor merge, so the resolved working_dir
                         # survives to the provider.
+                        # Every non-LLM variant returned or continued above, so
+                        # only a provider-backed LLM agent reaches this point.
+                        if not isinstance(agent, AgentDef) or resolved_agent is None:
+                            raise ExecutionError(
+                                f"Step '{agent.name}' of type {agent.type!r} cannot be "
+                                "executed as a provider-backed agent"
+                            )
                         _agent_start = _time.time()
                         executor = await self._get_executor_for_agent(resolved_agent)
                         guidance_section = self.context.get_guidance_prompt_section()
@@ -6789,7 +6815,7 @@ class WorkflowEngine:
                     exc_info=True,
                 )
 
-    def _find_agent(self, name: str) -> AgentDef | None:
+    def _find_agent(self, name: str) -> StepDef | None:
         """Find agent by name.
 
         Args:
@@ -7102,7 +7128,7 @@ class WorkflowEngine:
                 )
             agents.append(agent)
 
-        async def execute_single_agent(agent: AgentDef) -> tuple[str, Any]:
+        async def execute_single_agent(agent: StepDef) -> tuple[str, Any]:
             """Execute a single agent with the context snapshot.
 
             Returns:
@@ -7129,7 +7155,7 @@ class WorkflowEngine:
                 # emit set_started/set_completed/set_failed via _run_set_step
                 # so the dashboard renders set nodes consistently with the
                 # linear path.
-                if agent.type == "set":
+                if isinstance(agent, SetStepDef):
                     set_output = await self._run_set_step(agent, agent_context)
                     _agent_elapsed = _time.time() - _agent_start
                     self._emit(
@@ -7155,7 +7181,7 @@ class WorkflowEngine:
                 # the set branch above: no `parallel_agent_started` (that
                 # event is LLM-only), and `parallel_agent_completed` carries
                 # no `output` field — the no-values policy for step events.
-                if agent.type == "mcp":
+                if isinstance(agent, MCPStepDef):
                     mcp_envelope = await self._run_mcp_step(
                         agent,
                         agent_context,
@@ -7181,6 +7207,13 @@ class WorkflowEngine:
                 # Resolve working_dir / settings_dir for provider-backed LLM agents against
                 # this agent's own (pre-group snapshot) context. `set` steps
                 # returned above; other types in a parallel group are LLM agents.
+                # The static validator rejects every other variant in parallel
+                # groups, but a directly-constructed engine skips it.
+                if not isinstance(agent, AgentDef):
+                    raise ExecutionError(
+                        f"Step '{agent.name}' of type {agent.type!r} cannot execute "
+                        "in a parallel group"
+                    )
                 resolved_agent = self._resolve_agent_working_dir(agent, agent_context)
 
                 # LLM-only per-member start event: emitted only here (after the
@@ -7532,6 +7565,17 @@ class WorkflowEngine:
         # Resolve the source array from context
         items = self._resolve_array_reference(for_each_group.source)
 
+        # Reject unsupported inline variants before the empty-array early
+        # return below can let them pass silently. The static validator
+        # rejects these, but a directly-constructed engine skips it; the
+        # per-item guard in execute_single_item stays as a second line.
+        inline_agent = for_each_group.agent
+        if not isinstance(inline_agent, (AgentDef, WorkflowStepDef, SetStepDef, MCPStepDef)):
+            raise ExecutionError(
+                f"Step of type {inline_agent.type!r} cannot execute "
+                f"as the inline agent of for-each group '{for_each_group.name}'"
+            )
+
         # Handle empty arrays gracefully
         if not items:
             logger.debug(
@@ -7606,7 +7650,7 @@ class WorkflowEngine:
                 )
 
                 # Execute agent — sub-workflow or regular
-                if for_each_group.agent.type == "workflow":
+                if isinstance(for_each_group.agent, WorkflowStepDef):
                     # Build sub-workflow inputs using shared helper (consistent
                     # JSON-parse-with-fallback across all sub-workflow paths)
                     sub_inputs = self._build_subworkflow_inputs(for_each_group.agent, agent_context)
@@ -7684,7 +7728,7 @@ class WorkflowEngine:
                 # emit set_started/set_completed/set_failed via _run_set_step
                 # so the dashboard renders per-item set nodes consistently
                 # with the linear path.
-                if for_each_group.agent.type == "set":
+                if isinstance(for_each_group.agent, SetStepDef):
                     set_output = await self._run_set_step(for_each_group.agent, agent_context)
                     _item_elapsed = _time.time() - _item_start
                     self._emit(
@@ -7707,7 +7751,7 @@ class WorkflowEngine:
                 # field on for_each_item_completed — deliberate divergence
                 # from the set branch above: mcp events follow the no-values
                 # policy, the envelope is data for routing, never for events.
-                if for_each_group.agent.type == "mcp":
+                if isinstance(for_each_group.agent, MCPStepDef):
                     mcp_envelope = await self._run_mcp_step(
                         for_each_group.agent,
                         agent_context,
@@ -7736,8 +7780,17 @@ class WorkflowEngine:
                 # lines) can attribute interleaved output to a specific
                 # for-each iteration. The original AgentDef is untouched —
                 # only this iteration's copy carries the qualified name.
-                qualified_agent = for_each_group.agent.model_copy(
-                    update={"name": f"{for_each_group.agent.name}[{key}]"}
+                # The static validator limits inline for-each agents to
+                # workflow/set/mcp/LLM steps, but a directly-constructed
+                # engine skips it — reject anything else explicitly.
+                inline_agent = for_each_group.agent
+                if not isinstance(inline_agent, AgentDef):
+                    raise ExecutionError(
+                        f"Step of type {inline_agent.type!r} cannot execute "
+                        f"as the inline agent of for-each group '{for_each_group.name}'"
+                    )
+                qualified_agent = inline_agent.model_copy(
+                    update={"name": f"{inline_agent.name}[{key}]"}
                 )
 
                 # Resolve working_dir / settings_dir AFTER loop variables were injected into
@@ -8062,7 +8115,7 @@ class WorkflowEngine:
         result = self._evaluate_routes(agent, output)
         return result.target
 
-    def _evaluate_routes(self, agent: AgentDef, output: dict[str, Any]) -> RouteResult:
+    def _evaluate_routes(self, agent: RoutableStepBase, output: dict[str, Any]) -> RouteResult:
         """Evaluate routes using the Router.
 
         Uses the Router to evaluate routing rules and determine the next agent.
@@ -8162,7 +8215,7 @@ class WorkflowEngine:
 
         return result
 
-    def _build_terminate_output(self, agent: AgentDef) -> dict[str, Any]:
+    def _build_terminate_output(self, agent: TerminateStepDef) -> dict[str, Any]:
         """Build the final output for a ``type: terminate`` step.
 
         When ``agent.output_template`` is set, render its entries against the
@@ -8410,7 +8463,7 @@ class WorkflowEngine:
             routes_info = []
             route_targets = []
 
-            if agent.routes:
+            if isinstance(agent, RoutableStepBase) and agent.routes:
                 for route in agent.routes:
                     routes_info.append(
                         {
@@ -8420,7 +8473,7 @@ class WorkflowEngine:
                         }
                     )
                     route_targets.append(route.to)
-            elif agent.options:
+            elif isinstance(agent, HumanGateStepDef) and agent.options:
                 # Human gate with options
                 for option in agent.options:
                     routes_info.append(
@@ -8436,8 +8489,8 @@ class WorkflowEngine:
             # Build step
             step = ExecutionStep(
                 agent_name=agent_name,
-                agent_type=agent.type or "agent",
-                model=agent.model,
+                agent_type=agent.type,
+                model=agent.model if isinstance(agent, AgentDef) else None,
                 routes=routes_info,
                 is_loop_target=False,  # Will be updated after traversal
             )

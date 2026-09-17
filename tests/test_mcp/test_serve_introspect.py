@@ -660,6 +660,41 @@ class TestConductorPlanTree:
         assert by_name["analyzers"]["type"] == "for_each"
         assert by_name["analyzers"]["agent"] == "analyzer"
 
+    def test_terminate_step_node_has_no_routes(self, tmp_path: Path) -> None:
+        # Requirement: a terminate step appears in the plan tree with an empty
+        # routes list (it owns no ``routes`` field after the step-model split).
+        directory = tmp_path / "wfdir"
+        directory.mkdir()
+        (directory / "plan-terminate.yaml").write_text(
+            """\
+workflow:
+  name: plan-terminate
+  entry_point: first
+agents:
+  - name: first
+    prompt: "Step one"
+    routes:
+      - to: stop
+  - name: stop
+    type: terminate
+    status: success
+    reason: done
+""",
+            encoding="utf-8",
+        )
+        options = ServeOptions(workflow_dirs=(directory,))
+        catalogue = build_catalogue(
+            options, registries_config=RegistriesConfig(), allow_network=False
+        )
+
+        tree = conductor_plan_tree(
+            catalogue.entries[0].tool_name, catalogue=catalogue, options=options
+        )
+
+        by_name = {node["name"]: node for node in tree["nodes"]}
+        assert by_name["stop"]["type"] == "terminate"
+        assert by_name["stop"]["routes"] == []
+
     def test_unknown_tool_name_is_refused(self, tmp_path: Path) -> None:
         catalogue, options = self._catalogue(tmp_path)
 

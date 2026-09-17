@@ -13,9 +13,16 @@ from pydantic import ValidationError as PydanticValidationError
 
 from conductor.config.schema import (
     AgentDef,
+    HumanGateStepDef,
     ProviderSettings,
     RuntimeConfig,
     SandboxConfig,
+    ScriptStepDef,
+    SetStepDef,
+    StepDef,
+    TerminateStepDef,
+    WaitStepDef,
+    WorkflowStepDef,
 )
 
 
@@ -311,40 +318,36 @@ class TestSandboxOnAgentDef:
         assert agent.sandbox.identifier_scope == "workflow"
 
     @pytest.mark.parametrize(
-        "kwargs,match",
+        ("model", "fields"),
         [
+            (ScriptStepDef, {"name": "s", "command": "ls"}),
             (
-                {"name": "s", "type": "script", "command": "ls"},
-                "script agents cannot have 'sandbox'",
-            ),
-            (
+                HumanGateStepDef,
                 {
                     "name": "g",
-                    "type": "human_gate",
                     "prompt": "Pick",
                     "options": [{"label": "Yes", "value": "yes", "route": "$end"}],
                 },
-                "human_gate agents cannot have 'sandbox'",
             ),
-            (
-                {"name": "set", "type": "set", "value": "1"},
-                "set agents cannot have 'sandbox'",
-            ),
-            (
-                {"name": "w", "type": "wait", "duration": "1s"},
-                "wait agents cannot have 'sandbox'",
-            ),
-            (
-                {"name": "t", "type": "terminate", "status": "success", "reason": "done"},
-                "terminate agents cannot have 'sandbox'",
-            ),
-            (
-                {"name": "wf", "type": "workflow", "workflow": "./sub.yaml"},
-                "workflow agents cannot have 'sandbox'",
-            ),
+            (SetStepDef, {"name": "set", "value": "1"}),
+            (WaitStepDef, {"name": "w", "duration": "1s"}),
+            (TerminateStepDef, {"name": "t", "status": "success", "reason": "done"}),
+            (WorkflowStepDef, {"name": "wf", "workflow": "./sub.yaml"}),
         ],
         ids=["script", "human_gate", "set", "wait", "terminate", "workflow"],
     )
-    def test_sandbox_rejected_on_non_provider_types(self, kwargs: dict, match: str) -> None:
-        with pytest.raises(PydanticValidationError, match=match):
-            AgentDef.model_validate({**kwargs, "sandbox": {"identifier_scope": "agent"}})
+    def test_sandbox_rejected_on_non_provider_types(
+        self, model: type[StepDef], fields: dict
+    ) -> None:
+        """Every non-provider variant refuses ``sandbox:`` via ``extra="forbid"``.
+
+        The per-type "cannot have 'sandbox'" messages were removed in the
+        step-model split; the contract is now Pydantic's standard
+        extra_forbidden error on the foreign field.
+        """
+        with pytest.raises(PydanticValidationError) as exc_info:
+            model.model_validate({**fields, "sandbox": {"identifier_scope": "agent"}})
+        assert any(
+            e["loc"] == ("sandbox",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )

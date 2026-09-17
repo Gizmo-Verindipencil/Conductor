@@ -43,7 +43,7 @@ from conductor.executor.set_step import _to_json_safe, _yaml_load
 from conductor.executor.template import TemplateRenderer
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef
+    from conductor.config.schema import MCPStepDef
     from conductor.mcp.manager import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ class McpStepExecutor:
 
     async def execute(
         self,
-        agent: AgentDef,
+        agent: MCPStepDef,
         agent_context: dict[str, Any],
         manager: MCPManager,
     ) -> dict[str, Any]:
@@ -179,7 +179,7 @@ class McpStepExecutor:
             RuntimeError: Call failure or malformed structured content —
                 propagated from the manager.
         """
-        # Guaranteed by AgentDef.validate_agent_type (config/schema.py) for
+        # Guaranteed by MCPStepDef.validate_agent_type (config/schema.py) for
         # type == "mcp": both fields are required and non-empty.
         assert agent.server is not None
         assert agent.tool is not None

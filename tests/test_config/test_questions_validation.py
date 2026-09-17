@@ -7,10 +7,14 @@ from pydantic import ValidationError
 
 from conductor.config.schema import (
     AgentDef,
+    HumanGateStepDef,
     OutputField,
     ParallelGroup,
     QuestionDef,
+    QuestionsStepDef,
     RouteDef,
+    ScriptStepDef,
+    StepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -18,10 +22,17 @@ from conductor.config.validator import validate_workflow_config
 from conductor.exceptions import ConfigurationError
 
 
-def _questions(**kwargs) -> AgentDef:
+def _questions(**kwargs) -> QuestionsStepDef:
     """Build a questions node with a single inline question by default."""
     kwargs.setdefault("questions", [QuestionDef(text="Why?")])
-    return AgentDef(name="ask", type="questions", **kwargs)
+    return QuestionsStepDef(name="ask", **kwargs)
+
+
+def _assert_extra_forbidden(exc_info: pytest.ExceptionInfo, field: str) -> None:
+    """The step-model split rejects foreign fields with a plain extra_forbidden."""
+    assert any(
+        e["loc"] == (field,) and e["type"] == "extra_forbidden" for e in exc_info.value.errors()
+    )
 
 
 class TestQuestionsSchema:
@@ -30,22 +41,24 @@ class TestQuestionsSchema:
     def test_requires_questions_or_source(self) -> None:
         """A node with no question source has nothing to ask."""
         with pytest.raises(ValidationError, match="require either 'questions' or 'source'"):
-            AgentDef(name="ask", type="questions")
+            QuestionsStepDef(name="ask")
 
     def test_rejects_both_questions_and_source(self) -> None:
         """Two sources of truth would be ambiguous."""
         with pytest.raises(ValidationError, match="cannot set both"):
-            AgentDef(
+            QuestionsStepDef(
                 name="ask",
-                type="questions",
                 questions=[QuestionDef(text="a")],
                 source="x.output.y",
             )
 
     def test_rejects_gate_options(self) -> None:
         """Per-question choices live on the question, not the node."""
-        with pytest.raises(ValidationError, match="cannot have 'options'"):
-            _questions(options=[])
+        with pytest.raises(ValidationError) as exc_info:
+            QuestionsStepDef.model_validate(
+                {"name": "ask", "questions": [{"text": "Why?"}], "options": []}
+            )
+        _assert_extra_forbidden(exc_info, "options")
 
     def test_rejects_abort_route_without_allow_abort(self) -> None:
         """An abort route that can never be taken is a silent no-op."""
@@ -67,17 +80,20 @@ class TestQuestionsSchema:
     )
     def test_rejects_provider_only_fields(self, field: str, value: object) -> None:
         """No provider is invoked, so provider-shaped config must not be accepted."""
-        with pytest.raises(ValidationError, match=f"cannot have '{field}'"):
-            _questions(**{field: value})
+        with pytest.raises(ValidationError) as exc_info:
+            QuestionsStepDef.model_validate(
+                {"name": "ask", "questions": [{"text": "Why?"}], field: value}
+            )
+        _assert_extra_forbidden(exc_info, field)
 
     def test_source_must_be_a_dotted_path(self) -> None:
         """`source` inherits ForEachDef's format enforcement, not just its name."""
         with pytest.raises(ValidationError, match="Invalid source format"):
-            AgentDef(name="ask", type="questions", source="architect")
+            QuestionsStepDef(name="ask", source="architect")
 
     def test_valid_source_is_accepted(self) -> None:
         """A well-formed dotted path passes."""
-        agent = AgentDef(name="ask", type="questions", source="architect.output.open_questions")
+        agent = QuestionsStepDef(name="ask", source="architect.output.open_questions")
 
         assert agent.source == "architect.output.open_questions"
 
@@ -86,25 +102,31 @@ class TestQuestionsFieldsRejectedElsewhere:
     """The questions-only fields must not be silently ignored on other types."""
 
     def test_source_rejected_on_a_provider_agent(self) -> None:
-        """`source` is a new AgentDef field; nothing else reads it."""
-        with pytest.raises(ValidationError, match="cannot have 'source'"):
-            AgentDef(name="a", model="gpt-4", prompt="p", source="x.output.y")
+        """`source` is owned by questions/for-each steps; nothing else reads it."""
+        with pytest.raises(ValidationError) as exc_info:
+            AgentDef.model_validate(
+                {"name": "a", "model": "gpt-4", "prompt": "p", "source": "x.output.y"}
+            )
+        _assert_extra_forbidden(exc_info, "source")
 
     def test_nav_flag_rejected_on_a_script(self) -> None:
         """Tri-state flags exist so an explicit value is catchable here."""
-        with pytest.raises(ValidationError, match="cannot have 'allow_back'"):
-            AgentDef(name="s", type="script", command="ls", allow_back=False)
+        with pytest.raises(ValidationError) as exc_info:
+            ScriptStepDef.model_validate({"name": "s", "command": "ls", "allow_back": False})
+        _assert_extra_forbidden(exc_info, "allow_back")
 
     def test_questions_list_rejected_on_a_gate(self) -> None:
         """A human_gate has options, not questions."""
-        with pytest.raises(ValidationError, match="cannot have 'questions'"):
-            AgentDef(
-                name="g",
-                type="human_gate",
-                prompt="p",
-                options=[{"label": "a", "value": "a", "route": "$end"}],
-                questions=[QuestionDef(text="q")],
+        with pytest.raises(ValidationError) as exc_info:
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "g",
+                    "prompt": "p",
+                    "options": [{"label": "a", "value": "a", "route": "$end"}],
+                    "questions": [{"text": "q"}],
+                }
             )
+        _assert_extra_forbidden(exc_info, "questions")
 
 
 class TestQuestionDefSchema:
@@ -129,7 +151,7 @@ class TestQuestionDefSchema:
 class TestQuestionsCrossReferences:
     """Workflow-level validation."""
 
-    def _config(self, agent: AgentDef, **kwargs) -> WorkflowConfig:
+    def _config(self, agent: StepDef, **kwargs) -> WorkflowConfig:
         return WorkflowConfig(
             workflow=WorkflowDef(name="w", entry_point="ask"),
             agents=[

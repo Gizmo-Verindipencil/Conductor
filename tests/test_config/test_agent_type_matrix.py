@@ -10,7 +10,80 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from conductor.config.schema import AgentDef, GateOption
+from conductor.config.schema import (
+    AgentDef,
+    GateOption,
+    HumanGateStepDef,
+    QuestionsStepDef,
+    ScriptStepDef,
+    SetStepDef,
+    StepBase,
+    TerminateStepDef,
+    WaitStepDef,
+    WorkflowConfig,
+    WorkflowStepDef,
+)
+
+
+class TestStaticStepUnion:
+    """Workflow parsing produces concrete variants and publishes their discriminator."""
+
+    def test_workflow_config_stores_concrete_step_models(self) -> None:
+        # Requirement: parsed workflow steps retain their named runtime variant types.
+        config = WorkflowConfig.model_validate(
+            {
+                "workflow": {"name": "typed", "entry_point": "write"},
+                "agents": [
+                    {"name": "write", "prompt": "Write", "routes": [{"to": "pause"}]},
+                    {"name": "pause", "type": "wait", "duration": "1s"},
+                ],
+            }
+        )
+
+        assert type(config.agents[0]) is AgentDef
+        assert type(config.agents[1]) is WaitStepDef
+
+    def test_null_llm_type_is_canonicalized(self) -> None:
+        # Requirement: an explicit YAML null discriminator remains compatible with LLM steps.
+        config = WorkflowConfig.model_validate(
+            {
+                "workflow": {"name": "typed", "entry_point": "write"},
+                "agents": [{"name": "write", "type": None, "prompt": "Write"}],
+            }
+        )
+
+        assert type(config.agents[0]) is AgentDef
+        assert config.agents[0].type == "agent"
+
+    def test_workflow_json_schema_exposes_static_discriminator(self) -> None:
+        # Requirement: tooling can select a step schema through JSON Schema oneOf metadata.
+        agents_schema = WorkflowConfig.model_json_schema()["properties"]["agents"]["items"]
+
+        assert agents_schema["discriminator"]["propertyName"] == "type"
+        assert set(agents_schema["discriminator"]["mapping"]) == {
+            "agent",
+            "human_gate",
+            "mcp",
+            "questions",
+            "script",
+            "set",
+            "terminate",
+            "wait",
+            "workflow",
+        }
+        assert len(agents_schema["oneOf"]) == 9
+
+    def test_variant_rejects_fields_owned_by_another_step(self) -> None:
+        # Requirement: each concrete model forbids fields owned by sibling variants
+        # via extra="forbid" (standard extra_forbidden error).
+        with pytest.raises(PydanticValidationError) as exc_info:
+            ScriptStepDef.model_validate(
+                {"name": "run", "command": "echo", "prompt": "not allowed"}
+            )
+        assert any(
+            e["loc"] == ("prompt",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 class TestSessionKeyTypeMatrix:
@@ -29,47 +102,38 @@ class TestSessionKeyTypeMatrix:
             AgentDef(name="llm", prompt="hi", session_key="")
 
     @pytest.mark.parametrize(
-        "kwargs,match",
+        "step_class,valid_kwargs",
         [
+            (ScriptStepDef, {"name": "sc", "command": "ls"}),
             (
-                {"name": "sc", "type": "script", "command": "ls"},
-                "script agents cannot have 'session_key'",
+                QuestionsStepDef,
+                {"name": "q", "questions": [{"id": "q1", "text": "Why?"}]},
             ),
+            (WaitStepDef, {"name": "w", "duration": "1s"}),
+            (SetStepDef, {"name": "s", "value": "1"}),
+            (TerminateStepDef, {"name": "t", "status": "success", "reason": "done"}),
             (
-                {"name": "q", "type": "questions", "questions": [{"id": "q1", "text": "Why?"}]},
-                "questions agents cannot have 'session_key'",
-            ),
-            (
-                {"name": "w", "type": "wait", "duration": "1s"},
-                "wait agents cannot have 'session_key'",
-            ),
-            (
-                {"name": "s", "type": "set", "value": "1"},
-                "set agents cannot have 'session_key'",
-            ),
-            (
-                {"name": "t", "type": "terminate", "status": "success", "reason": "done"},
-                "terminate agents cannot have 'session_key'",
-            ),
-            (
+                HumanGateStepDef,
                 {
                     "name": "g",
-                    "type": "human_gate",
                     "prompt": "Pick",
                     "options": [GateOption(label="Yes", value="yes", route="$end")],
                 },
-                "human_gate agents cannot have 'session_key'",
             ),
-            (
-                {"name": "wf", "type": "workflow", "workflow": "./sub.yaml"},
-                "workflow agents cannot have 'session_key'",
-            ),
+            (WorkflowStepDef, {"name": "wf", "workflow": "./sub.yaml"}),
         ],
         ids=["script", "questions", "wait", "set", "terminate", "human_gate", "workflow"],
     )
-    def test_session_key_rejected(self, kwargs: dict, match: str) -> None:
-        with pytest.raises(PydanticValidationError, match=match):
-            AgentDef(**kwargs, session_key="investigation")  # type: ignore[arg-type]
+    def test_session_key_rejected(self, step_class: type[StepBase], valid_kwargs: dict) -> None:
+        # Requirement: session_key is an LLM-agent-only field; every sibling variant
+        # forbids it via extra="forbid" (standard extra_forbidden error, not a
+        # per-type custom message).
+        with pytest.raises(PydanticValidationError) as exc_info:
+            step_class.model_validate({**valid_kwargs, "session_key": "investigation"})
+        assert any(
+            e["loc"] == ("session_key",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 class TestSessionKeyLiteral:

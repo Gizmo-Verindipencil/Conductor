@@ -293,6 +293,7 @@ class TestHumanGateIntegration:
         from conductor.config.schema import (
             AgentDef,
             GateOption,
+            HumanGateStepDef,
             OutputField,
             RouteDef,
             WorkflowConfig,
@@ -312,9 +313,8 @@ class TestHumanGateIntegration:
                     output={"proposal": OutputField(type="string")},
                     routes=[RouteDef(to="approval")],
                 ),
-                AgentDef(
+                HumanGateStepDef(
                     name="approval",
-                    type="human_gate",
                     prompt="Review proposal: {{ prepare.output.proposal }}",
                     options=[
                         GateOption(label="Approve", value="approved", route="execute"),
@@ -359,6 +359,7 @@ class TestHumanGateIntegration:
         from conductor.config.schema import (
             AgentDef,
             GateOption,
+            HumanGateStepDef,
             OutputField,
             WorkflowConfig,
             WorkflowDef,
@@ -370,9 +371,8 @@ class TestHumanGateIntegration:
                 entry_point="confirmation",
             ),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="confirmation",
-                    type="human_gate",
                     prompt="Confirm action?",
                     options=[
                         GateOption(label="Cancel", value="cancelled", route="$end"),

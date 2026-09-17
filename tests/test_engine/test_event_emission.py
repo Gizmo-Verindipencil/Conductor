@@ -17,6 +17,7 @@ from conductor.config.schema import (
     ContextConfig,
     ForEachDef,
     GateOption,
+    HumanGateStepDef,
     LimitsConfig,
     OutputField,
     ParallelGroup,
@@ -24,6 +25,8 @@ from conductor.config.schema import (
     ReasoningConfig,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -793,9 +796,8 @@ class TestScriptEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="run_echo",
-                    type="script",
                     command=sys.executable,
                     args=["-c", "print('hello')"],
                     routes=[RouteDef(to="$end")],
@@ -834,9 +836,8 @@ class TestScriptEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="bad_script",
-                    type="script",
                     command="nonexistent_command_xyz_12345",
                     routes=[RouteDef(to="$end")],
                 ),
@@ -1093,8 +1094,8 @@ class TestParallelGroupEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(name="left", type="set", value="left"),
-                AgentDef(name="right", type="set", value="right"),
+                SetStepDef(name="left", value="left"),
+                SetStepDef(name="right", value="right"),
             ],
             parallel=[
                 ParallelGroup(
@@ -1355,9 +1356,8 @@ class TestGateEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="reviewer",
-                    type="human_gate",
                     prompt="Do you approve?",
                     options=[
                         GateOption(
@@ -1412,9 +1412,8 @@ class TestGateEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Continue?",
                     options=[
                         GateOption(
@@ -1458,9 +1457,8 @@ class TestGateEvents:
                 limits=LimitsConfig(max_iterations=10),
             ),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(

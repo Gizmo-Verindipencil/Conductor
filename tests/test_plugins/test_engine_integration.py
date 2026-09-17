@@ -25,6 +25,7 @@ from conductor.config.schema import (
     RuntimeConfig,
     WorkflowConfig,
     WorkflowDef,
+    WorkflowStepDef,
 )
 from conductor.engine.workflow import WorkflowEngine
 from conductor.plugins.errors import PluginNotFoundError
@@ -444,9 +445,8 @@ class TestSubworkflowSources:
                 runtime=RuntimeConfig(provider="copilot", plugin_sources=sources),
             ),
             agents=[
-                AgentDef(
+                WorkflowStepDef(
                     name="delegate",
-                    type="workflow",
                     workflow="child.yaml",
                     routes=[RouteDef(to="$end")],
                 )

@@ -9,7 +9,18 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from conductor.config.schema import AgentDef, PluginDef, RuntimeConfig
+from conductor.config.schema import (
+    AgentDef,
+    HumanGateStepDef,
+    PluginDef,
+    RuntimeConfig,
+    ScriptStepDef,
+    SetStepDef,
+    StepDef,
+    TerminateStepDef,
+    WaitStepDef,
+    WorkflowStepDef,
+)
 
 
 class TestCoercion:
@@ -68,22 +79,31 @@ class TestRejections:
             RuntimeConfig.model_validate({"plugins": ["prs", {"name": "prs", "mcp": False}]})
 
     @pytest.mark.parametrize(
-        ("kind", "extra"),
+        ("model", "extra"),
         [
-            ("script", {"command": "ls"}),
+            (ScriptStepDef, {"command": "ls"}),
             (
-                "human_gate",
+                HumanGateStepDef,
                 {"prompt": "?", "options": [{"label": "a", "value": "a", "route": "next"}]},
             ),
-            ("wait", {"duration": "1s"}),
-            ("set", {"value": "x"}),
-            ("terminate", {"status": "success", "reason": "done"}),
-            ("workflow", {"workflow": "child.yaml"}),
+            (WaitStepDef, {"duration": "1s"}),
+            (SetStepDef, {"value": "x"}),
+            (TerminateStepDef, {"status": "success", "reason": "done"}),
+            (WorkflowStepDef, {"workflow": "child.yaml"}),
         ],
+        ids=["script", "human_gate", "wait", "set", "terminate", "workflow"],
     )
-    def test_non_provider_backed_steps_reject_plugins(self, kind: str, extra: dict) -> None:
-        with pytest.raises(ValidationError, match=f"{kind} agents cannot have 'plugins'"):
-            AgentDef.model_validate({"name": "s", "type": kind, "plugins": ["prs"], **extra})
+    def test_non_provider_backed_steps_reject_plugins(
+        self, model: type[StepDef], extra: dict
+    ) -> None:
+        # Requirement: plugins are provider-backed-only; every other variant
+        # rejects the field with a plain extra_forbidden after the step-model split.
+        with pytest.raises(ValidationError) as exc_info:
+            model.model_validate({"name": "s", "plugins": ["prs"], **extra})
+        assert any(
+            e["loc"] == ("plugins",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
 
 class TestSerialization:

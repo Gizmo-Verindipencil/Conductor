@@ -38,10 +38,12 @@ from conductor.config.schema import (
     ForEachDef,
     LimitsConfig,
     MCPServerDef,
+    MCPStepDef,
     OutputField,
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    SetStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -100,9 +102,8 @@ def _runtime(
 
 
 def _mcp_agent(name: str, server: str, arguments: dict[str, Any] | None = None) -> AgentDef:
-    return AgentDef(
+    return MCPStepDef(
         name=name,
-        type="mcp",
         server=server,
         tool="echo",
         arguments=arguments or {"q": "hello"},
@@ -148,7 +149,7 @@ class TestMcpInParallelGroup:
             ),
             agents=[
                 _mcp_agent("call", "srv"),
-                AgentDef(name="flag", type="set", value="ready", routes=[]),
+                SetStepDef(name="flag", value="ready", routes=[]),
             ],
             parallel=[
                 ParallelGroup(name="grp", agents=["call", "flag"], routes=[RouteDef(to="$end")])
@@ -557,7 +558,7 @@ class TestMcpInParallelGroup:
                 context=ContextConfig(mode="accumulate"),
                 limits=LimitsConfig(max_iterations=10),
             ),
-            agents=[mcp, AgentDef(name="flag", type="set", value="ready", routes=[])],
+            agents=[mcp, SetStepDef(name="flag", value="ready", routes=[])],
             parallel=[
                 ParallelGroup(name="grp", agents=["call", "flag"], routes=[RouteDef(to="$end")])
             ],

@@ -1229,12 +1229,12 @@ async def test_nested_subworkflow_agents_parent_under_child_workflow(
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     from conductor.config.schema import (
-        AgentDef,
         LimitsConfig,
         RouteDef,
         RuntimeConfig,
         WorkflowConfig,
         WorkflowDef,
+        WorkflowStepDef,
     )
     from conductor.engine.workflow import RunContext, WorkflowEngine
     from conductor.events import WorkflowEventEmitter
@@ -1266,9 +1266,8 @@ output:
             limits=LimitsConfig(max_iterations=5),
         ),
         agents=[
-            AgentDef(
+            WorkflowStepDef(
                 name="delegate",
-                type="workflow",
                 workflow="child.yaml",
                 routes=[RouteDef(to="$end")],
             ),
@@ -1325,13 +1324,13 @@ async def test_nested_subworkflow_uses_inherited_registry_provider_identity(
 ):
     """Scenario 14: child events reflect the provider its inherited registry executes."""
     from conductor.config.schema import (
-        AgentDef,
         LimitsConfig,
         ProviderSettings,
         RouteDef,
         RuntimeConfig,
         WorkflowConfig,
         WorkflowDef,
+        WorkflowStepDef,
     )
     from conductor.engine.workflow import RunContext, WorkflowEngine
     from conductor.events import WorkflowEventEmitter
@@ -1374,9 +1373,8 @@ output:
             limits=LimitsConfig(max_iterations=5),
         ),
         agents=[
-            AgentDef(
+            WorkflowStepDef(
                 name="delegate",
-                type="workflow",
                 workflow="child-provider.yaml",
                 routes=[RouteDef(to="$end")],
             )

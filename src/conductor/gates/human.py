@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from conductor.config.schema import AgentDef, GateOption
+    from conductor.config.schema import GateOption, HumanGateStepDef
 
 
 MULTILINE_SENTINEL = "."
@@ -138,7 +138,7 @@ async def read_on_daemon_thread[T](fn: Callable[[], T]) -> T:
     return await future
 
 
-def option_for_value(agent: AgentDef, value: str) -> GateOption:
+def option_for_value(agent: HumanGateStepDef, value: str) -> GateOption:
     """Map a response value back to a gate agent's declared option.
 
     Lives at module level because routing belongs to whoever owns the
@@ -296,7 +296,7 @@ class HumanGateHandler:
 
     async def handle_gate(
         self,
-        agent: AgentDef,
+        agent: HumanGateStepDef,
         context: dict[str, Any],
         base_dir: Path | None = None,
     ) -> GateResult:
@@ -335,7 +335,7 @@ class HumanGateHandler:
 
     def build_gate_prompt(
         self,
-        agent: AgentDef,
+        agent: HumanGateStepDef,
         context: dict[str, Any],
         base_dir: Path | None = None,
     ) -> GatePrompt:

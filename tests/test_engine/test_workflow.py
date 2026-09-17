@@ -20,12 +20,15 @@ from conductor.config.schema import (
     ContextConfig,
     ForEachDef,
     GateOption,
+    HumanGateStepDef,
     InputDef,
     LimitsConfig,
     OutputField,
     ParallelGroup,
     RouteDef,
     RuntimeConfig,
+    ScriptStepDef,
+    TerminateStepDef,
     WorkflowConfig,
     WorkflowDef,
 )
@@ -356,9 +359,8 @@ class TestWorkflowEngineContextModes:
                 context=ContextConfig(mode="explicit"),
             ),
             agents=[
-                AgentDef(
+                ScriptStepDef(
                     name="detector",
-                    type="script",
                     command=sys.executable,
                     args=[
                         "-c",
@@ -1181,9 +1183,8 @@ class TestWorkflowEngineHumanGates:
                     output={"draft": OutputField(type="string")},
                     routes=[RouteDef(to="approval_gate")],
                 ),
-                AgentDef(
+                HumanGateStepDef(
                     name="approval_gate",
-                    type="human_gate",
                     prompt="Review the draft:\n\n{{ drafter.output.draft }}",
                     options=[
                         GateOption(
@@ -1275,9 +1276,8 @@ class TestWorkflowEngineHumanGates:
                 entry_point="gate",
             ),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Confirm action",
                     options=[
                         GateOption(
@@ -1346,9 +1346,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-prompt-for", entry_point="ask_human"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="ask_human",
-                    type="human_gate",
                     prompt="Provide input:",
                     options=[
                         GateOption(
@@ -1424,9 +1423,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-collision", entry_point="gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="gate",
-                    type="human_gate",
                     prompt="Go:",
                     options=[
                         GateOption(
@@ -1481,9 +1479,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-web", entry_point="approval_gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="approval_gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(
@@ -1563,9 +1560,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-template-readthrough", entry_point="ask_human"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="ask_human",
-                    type="human_gate",
                     prompt="Provide input:",
                     options=[
                         GateOption(
@@ -1621,9 +1617,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-bg", entry_point="approval_gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="approval_gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(label="Approve", value="approved", route="next"),
@@ -1679,9 +1674,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-tty", entry_point="approval_gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="approval_gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(label="Approve", value="approved", route="next"),
@@ -1758,9 +1752,8 @@ class TestWorkflowEngineHumanGates:
         config = WorkflowConfig(
             workflow=WorkflowDef(name="gate-bg-no-dashboard", entry_point="approval_gate"),
             agents=[
-                AgentDef(
+                HumanGateStepDef(
                     name="approval_gate",
-                    type="human_gate",
                     prompt="Approve?",
                     options=[
                         GateOption(label="Approve", value="approved", route="$end"),
@@ -3083,9 +3076,8 @@ class TestWorkflowEngineTerminate:
                 output={"value": OutputField(type="string")},
                 routes=[RouteDef(to="finish")],
             ),
-            AgentDef(
+            TerminateStepDef(
                 name="finish",
-                type="terminate",
                 status=status,  # type: ignore[arg-type]
                 reason=reason,
                 output_template=output_template,
@@ -3276,9 +3268,8 @@ class TestWorkflowEngineTerminate:
                     output={"value": OutputField(type="string")},
                     routes=[RouteDef(to="finish")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="finish",
-                    type="terminate",
                     status="success",
                     reason="all done",
                 ),
@@ -3336,9 +3327,8 @@ class TestWorkflowEngineTerminate:
                     output={"value": OutputField(type="string")},
                     routes=[RouteDef(to="finish")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="finish",
-                    type="terminate",
                     status="success",
                     reason="ok",
                     input=["upstream.output"],
@@ -3384,9 +3374,8 @@ class TestWorkflowEngineTerminateAdditionalScenarios:
                 limits=LimitsConfig(max_iterations=5),
             ),
             agents=[
-                AgentDef(
+                TerminateStepDef(
                     name="bye",
-                    type="terminate",
                     status="success",
                     reason="nothing to do",
                     output_template={"result": "no-op"},
@@ -3437,9 +3426,8 @@ class TestWorkflowEngineTerminateAdditionalScenarios:
                     prompt="b",
                     output={"y": OutputField(type="string")},
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="finish",
-                    type="terminate",
                     status="success",
                     reason="parallel branches done",
                     output_template={"result": "from-parallel"},
@@ -3496,9 +3484,8 @@ class TestWorkflowEngineTerminateAdditionalScenarios:
                     output={"items": OutputField(type="array")},
                     routes=[RouteDef(to="loop")],
                 ),
-                AgentDef(
+                TerminateStepDef(
                     name="finish",
-                    type="terminate",
                     status="success",
                     reason="for_each done",
                     output_template={"result": "from-for-each"},
@@ -3555,7 +3542,7 @@ class TestWorkflowEngineTerminateAdditionalScenarios:
                 limits=LimitsConfig(max_iterations=5),
             ),
             agents=[
-                AgentDef(name="abort", type="terminate", status="failed", reason="halt"),
+                TerminateStepDef(name="abort", status="failed", reason="halt"),
             ],
             output={},
         )

@@ -8,8 +8,10 @@ from pydantic import ValidationError
 from conductor.config.schema import (
     AgentDef,
     DialogConfig,
-    GateOption,
+    HumanGateStepDef,
     RouteDef,
+    ScriptStepDef,
+    WorkflowStepDef,
 )
 
 
@@ -54,34 +56,49 @@ class TestAgentDefDialog:
 
     def test_human_gate_cannot_have_dialog(self) -> None:
         """Test that human_gate agents cannot have dialog config."""
-        with pytest.raises(ValidationError, match="human_gate agents cannot have 'dialog'"):
-            AgentDef(
-                name="gate",
-                type="human_gate",
-                prompt="Choose an option",
-                options=[GateOption(label="Continue", value="continue", route="next")],
-                dialog=DialogConfig(trigger_prompt="test"),
+        with pytest.raises(ValidationError) as exc_info:
+            HumanGateStepDef.model_validate(
+                {
+                    "name": "gate",
+                    "prompt": "Choose an option",
+                    "options": [{"label": "Continue", "value": "continue", "route": "next"}],
+                    "dialog": {"trigger_prompt": "test"},
+                }
             )
+        assert any(
+            e["loc"] == ("dialog",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_script_cannot_have_dialog(self) -> None:
         """Test that script agents cannot have dialog config."""
-        with pytest.raises(ValidationError, match="script agents cannot have 'dialog'"):
-            AgentDef(
-                name="runner",
-                type="script",
-                command="echo hello",
-                dialog=DialogConfig(trigger_prompt="test"),
+        with pytest.raises(ValidationError) as exc_info:
+            ScriptStepDef.model_validate(
+                {
+                    "name": "runner",
+                    "command": "echo hello",
+                    "dialog": {"trigger_prompt": "test"},
+                }
             )
+        assert any(
+            e["loc"] == ("dialog",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_workflow_cannot_have_dialog(self) -> None:
         """Test that workflow agents cannot have dialog config."""
-        with pytest.raises(ValidationError, match="workflow agents cannot have 'dialog'"):
-            AgentDef(
-                name="sub",
-                type="workflow",
-                workflow="./sub.yaml",
-                dialog=DialogConfig(trigger_prompt="test"),
+        with pytest.raises(ValidationError) as exc_info:
+            WorkflowStepDef.model_validate(
+                {
+                    "name": "sub",
+                    "workflow": "./sub.yaml",
+                    "dialog": {"trigger_prompt": "test"},
+                }
             )
+        assert any(
+            e["loc"] == ("dialog",) and e["type"] == "extra_forbidden"
+            for e in exc_info.value.errors()
+        )
 
     def test_agent_with_dialog_and_routes(self) -> None:
         """Test that agents with dialog can also have routes."""

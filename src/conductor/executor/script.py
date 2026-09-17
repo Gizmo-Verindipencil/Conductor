@@ -29,7 +29,7 @@ def _verbose_log(message: str, style: str = "dim") -> None:
 
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef
+    from conductor.config.schema import ScriptStepDef
 
 
 @dataclass
@@ -69,7 +69,7 @@ class ScriptExecutor:
 
     async def execute(
         self,
-        agent: AgentDef,
+        agent: ScriptStepDef,
         context: dict[str, Any],
     ) -> ScriptOutput:
         """Execute a script step.

@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from conductor.config.schema import AgentDef
+from conductor.config.schema import WaitStepDef
 from conductor.exceptions import ValidationError
 from conductor.executor.wait import WaitExecutor, WaitOutput
 
@@ -34,7 +34,7 @@ class TestWaitOutput:
 class TestWaitExecutorBasic:
     @pytest.mark.asyncio
     async def test_short_sleep(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration="100ms")
+        agent = WaitStepDef(name="w", duration="100ms")
         out = await executor.execute(agent, {})
         # Don't assert a tight lower bound — event-loop scheduling jitter
         # on loaded CI can make the monotonic elapsed slightly under the
@@ -48,7 +48,7 @@ class TestWaitExecutorBasic:
 
     @pytest.mark.asyncio
     async def test_numeric_duration(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration=0.05)
+        agent = WaitStepDef(name="w", duration=0.05)
         out = await executor.execute(agent, {})
         assert out.requested_seconds == 0.05
         assert out.waited_seconds < 1.0
@@ -56,15 +56,14 @@ class TestWaitExecutorBasic:
 
     @pytest.mark.asyncio
     async def test_reason_rendered(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration="50ms", reason="hi {{ name }}")
+        agent = WaitStepDef(name="w", duration="50ms", reason="hi {{ name }}")
         out = await executor.execute(agent, {"name": "there"})
         assert out.reason == "hi there"
 
     @pytest.mark.asyncio
     async def test_templated_duration(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(
+        agent = WaitStepDef(
             name="w",
-            type="wait",
             duration="{{ workflow.input.interval }}ms",
         )
         out = await executor.execute(agent, {"workflow": {"input": {"interval": 50}}})
@@ -74,7 +73,7 @@ class TestWaitExecutorBasic:
 class TestWaitExecutorInterrupt:
     @pytest.mark.asyncio
     async def test_interrupt_cancels_early(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration="10s")
+        agent = WaitStepDef(name="w", duration="10s")
         ev = asyncio.Event()
         task = asyncio.create_task(executor.execute(agent, {}, interrupt_event=ev))
         await asyncio.sleep(0.05)
@@ -88,7 +87,7 @@ class TestWaitExecutorInterrupt:
 
     @pytest.mark.asyncio
     async def test_no_interrupt_runs_to_completion(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration="50ms")
+        agent = WaitStepDef(name="w", duration="50ms")
         ev = asyncio.Event()
         out = await executor.execute(agent, {}, interrupt_event=ev)
         assert out.interrupted is False
@@ -96,7 +95,7 @@ class TestWaitExecutorInterrupt:
 
     @pytest.mark.asyncio
     async def test_outer_cancellation_propagates(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(name="w", type="wait", duration="10s")
+        agent = WaitStepDef(name="w", duration="10s")
         ev = asyncio.Event()
         task = asyncio.create_task(executor.execute(agent, {}, interrupt_event=ev))
         await asyncio.sleep(0.05)
@@ -112,15 +111,14 @@ class TestWaitExecutorRuntimeValidation:
     async def test_unparseable_duration(self, executor: WaitExecutor) -> None:
         # Bypass the schema by constructing via model_construct (skips
         # validation), then trip the runtime parser.
-        agent = AgentDef.model_construct(name="w", type="wait", duration="forever")
+        agent = WaitStepDef.model_construct(name="w", type="wait", duration="forever")
         with pytest.raises(ValidationError, match="Wait 'w'"):
             await executor.execute(agent, {})
 
     @pytest.mark.asyncio
     async def test_zero_duration_via_template(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(
+        agent = WaitStepDef(
             name="w",
-            type="wait",
             duration="{{ workflow.input.interval }}s",
         )
         with pytest.raises(ValidationError, match="must be > 0"):
@@ -128,9 +126,8 @@ class TestWaitExecutorRuntimeValidation:
 
     @pytest.mark.asyncio
     async def test_over_cap_via_template(self, executor: WaitExecutor) -> None:
-        agent = AgentDef(
+        agent = WaitStepDef(
             name="w",
-            type="wait",
             duration="{{ workflow.input.interval }}h",
         )
         with pytest.raises(ValidationError, match="24h cap"):

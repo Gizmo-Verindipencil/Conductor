@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from conductor.config.schema import AgentDef
+from conductor.config.schema import ScriptStepDef
 from conductor.exceptions import ExecutionError, TemplateError
 from conductor.executor.script import ScriptExecutor, ScriptOutput
 
@@ -51,9 +51,8 @@ class TestScriptExecutorBasic:
     @pytest.mark.asyncio
     async def test_simple_echo(self, executor: ScriptExecutor) -> None:
         """Test simple command captures stdout."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_echo",
-            type="script",
             command=sys.executable,
             args=["-c", "print('hello')"],
         )
@@ -64,9 +63,8 @@ class TestScriptExecutorBasic:
     @pytest.mark.asyncio
     async def test_command_with_multiple_args(self, executor: ScriptExecutor) -> None:
         """Test command with multiple arguments."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_printf",
-            type="script",
             command=sys.executable,
             args=[
                 "-c",
@@ -82,9 +80,8 @@ class TestScriptExecutorBasic:
     @pytest.mark.asyncio
     async def test_failing_command_exit_code(self, executor: ScriptExecutor) -> None:
         """Test that non-zero exit code is captured correctly (not 0)."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_false",
-            type="script",
             command=sys.executable,
             args=["-c", "import sys; sys.exit(1)"],
         )
@@ -95,9 +92,8 @@ class TestScriptExecutorBasic:
     @pytest.mark.asyncio
     async def test_stderr_captured(self, executor: ScriptExecutor) -> None:
         """Test that stderr is captured separately from stdout."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stderr",
-            type="script",
             command=sys.executable,
             args=["-c", "import sys; print('out'); print('err', file=sys.stderr)"],
         )
@@ -112,9 +108,8 @@ class TestScriptExecutorTimeout:
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self, executor: ScriptExecutor) -> None:
         """Test that timeout kills process and raises ExecutionError."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_timeout",
-            type="script",
             command=sys.executable,
             args=["-c", "import time; time.sleep(10)"],
             timeout=1,
@@ -125,9 +120,8 @@ class TestScriptExecutorTimeout:
     @pytest.mark.asyncio
     async def test_no_timeout_default(self, executor: ScriptExecutor) -> None:
         """Test that no timeout allows command to complete."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_quick",
-            type="script",
             command=sys.executable,
             args=["-c", "print('fast')"],
         )
@@ -141,9 +135,8 @@ class TestScriptExecutorEnvironment:
     @pytest.mark.asyncio
     async def test_custom_env_passed(self, executor: ScriptExecutor) -> None:
         """Test that custom environment variables are passed to subprocess."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_env",
-            type="script",
             command=sys.executable,
             args=["-c", "import os; print(os.environ['MY_TEST_VAR'])"],
             env={"MY_TEST_VAR": "custom_value"},
@@ -154,9 +147,8 @@ class TestScriptExecutorEnvironment:
     @pytest.mark.asyncio
     async def test_env_merges_with_os_environ(self, executor: ScriptExecutor) -> None:
         """Test that agent env merges with process environment."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_env_merge",
-            type="script",
             command=sys.executable,
             args=["-c", "import os; print(os.environ.get('PATH', ''))"],
             env={"MY_EXTRA": "val"},
@@ -173,9 +165,8 @@ class TestScriptExecutorEnvironment:
         YAML loader's ${VAR:-default} pass, not by the Jinja2 template engine.
         Jinja2 syntax in env values is treated as a literal string.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_env_no_render",
-            type="script",
             command=sys.executable,
             args=["-c", "import os; print(os.environ['MY_VAR'])"],
             env={"MY_VAR": "{{ literal_braces }}"},
@@ -192,9 +183,8 @@ class TestScriptExecutorWorkingDir:
     async def test_working_dir_respected(self, executor: ScriptExecutor) -> None:
         """Test that working_dir is used by subprocess."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = AgentDef(
+            agent = ScriptStepDef(
                 name="test_cwd",
-                type="script",
                 command=sys.executable,
                 args=["-c", "import os; print(os.getcwd())"],
                 working_dir=tmpdir,
@@ -207,9 +197,8 @@ class TestScriptExecutorWorkingDir:
     async def test_working_dir_with_jinja2_template(self, executor: ScriptExecutor) -> None:
         """Test that working_dir supports Jinja2 template rendering."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = AgentDef(
+            agent = ScriptStepDef(
                 name="test_cwd_tpl",
-                type="script",
                 command=sys.executable,
                 args=["-c", "import os; print(os.getcwd())"],
                 working_dir="{{ target_dir }}",
@@ -224,9 +213,8 @@ class TestScriptExecutorTemplating:
     @pytest.mark.asyncio
     async def test_template_in_command(self, executor: ScriptExecutor) -> None:
         """Test Jinja2 template rendering in command field."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_cmd_tpl",
-            type="script",
             command="{{ cmd }}",
             args=["-c", "print('ok')"],
         )
@@ -236,9 +224,8 @@ class TestScriptExecutorTemplating:
     @pytest.mark.asyncio
     async def test_template_in_args(self, executor: ScriptExecutor) -> None:
         """Test Jinja2 template rendering in args."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_args_tpl",
-            type="script",
             command=sys.executable,
             args=["-c", "print('{{ greeting }}')"],
         )
@@ -248,9 +235,8 @@ class TestScriptExecutorTemplating:
     @pytest.mark.asyncio
     async def test_template_with_workflow_context(self, executor: ScriptExecutor) -> None:
         """Test template rendering with nested workflow context."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_ctx_tpl",
-            type="script",
             command=sys.executable,
             args=["-c", "print('{{ workflow.input.message }}')"],
         )
@@ -265,9 +251,8 @@ class TestScriptExecutorErrors:
     @pytest.mark.asyncio
     async def test_command_not_found(self, executor: ScriptExecutor) -> None:
         """Test that command not found raises ExecutionError."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_notfound",
-            type="script",
             command="definitely_not_a_real_command_xyz123",
         )
         with pytest.raises(ExecutionError, match="command not found"):
@@ -276,9 +261,8 @@ class TestScriptExecutorErrors:
     @pytest.mark.asyncio
     async def test_specific_exit_code(self, executor: ScriptExecutor) -> None:
         """Test that specific exit codes are captured correctly."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_exit42",
-            type="script",
             command=sys.executable,
             args=["-c", "import sys; sys.exit(42)"],
         )
@@ -299,9 +283,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_bare_name_resolved_via_which(self, executor: ScriptExecutor) -> None:
         """A bare command name is resolved to the executable ``which`` finds."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_bare",
-            type="script",
             command="python",
             args=["-c", "print('hello')"],
         )
@@ -325,9 +308,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_absolute_path_resolved_via_which(self, executor: ScriptExecutor) -> None:
         """An absolute path (incl. forward slashes) is resolved via ``which``."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_abs",
-            type="script",
             command="C:/Python314/python",
             args=["-c", "print('hello')"],
         )
@@ -352,9 +334,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_which_none_falls_back_to_rendered(self, executor: ScriptExecutor) -> None:
         """When ``which`` cannot resolve, the rendered command is used as-is."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_fallback",
-            type="script",
             command="python",
             args=["-c", "print('hello')"],
         )
@@ -375,9 +356,8 @@ class TestScriptExecutorCommandResolution:
         self, executor: ScriptExecutor
     ) -> None:
         """A relative path with a separator is left untouched (working_dir semantics)."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_relative",
-            type="script",
             command="./scripts/run.sh",
             args=[],
         )
@@ -398,9 +378,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_args_not_resolved(self, executor: ScriptExecutor) -> None:
         """Args are never passed through ``which`` (may contain URLs or flags with /)."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_args_preserve",
-            type="script",
             command="python",
             args=["-c", "print('hello')", "https://example.com/api/v1"],
         )
@@ -429,9 +408,8 @@ class TestScriptExecutorCommandResolution:
         ``os.environ["PATH"]`` before ``env`` was built, so an ``agent.env`` PATH
         override silently ran a different binary than the subprocess would use.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_env_path",
-            type="script",
             command="toolx",
             env={"PATH": "/childbin"},
         )
@@ -455,9 +433,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_file_not_found_includes_hint_on_windows(self, executor: ScriptExecutor) -> None:
         """FileNotFoundError on Windows includes a path-resolution hint."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_hint",
-            type="script",
             command="C:/nonexistent/python.exe",
         )
         with (
@@ -480,9 +457,8 @@ class TestScriptExecutorCommandResolution:
     @pytest.mark.asyncio
     async def test_file_not_found_no_hint_on_linux(self, executor: ScriptExecutor) -> None:
         """FileNotFoundError on Linux does not include the Windows hint."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_no_hint",
-            type="script",
             command="/usr/local/bin/nonexistent",
         )
         with (
@@ -512,9 +488,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_round_trip(self, executor: ScriptExecutor) -> None:
         """A rendered stdin payload is delivered verbatim to the child."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="hello from stdin",
@@ -527,9 +502,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_jinja2_rendered_from_context(self, executor: ScriptExecutor) -> None:
         """The stdin field is a Jinja2 template rendered against the context."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_tpl",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="{{ workflow.input.message }}",
@@ -541,9 +515,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_json_via_tojson_filter(self, executor: ScriptExecutor) -> None:
         """Structured data is handed off as valid JSON via the ``tojson`` filter."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_json",
-            type="script",
             command=sys.executable,
             args=[
                 "-c",
@@ -566,9 +539,8 @@ class TestScriptExecutorStdin:
         is delivered intact. This is the core cross-platform fix for issue #18.
         """
         payload = "x" * (2 * 1024 * 1024)  # 2 MB, well beyond ARG_MAX
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_large",
-            type="script",
             command=sys.executable,
             args=["-c", _LEN_STDIN],
             stdin="{{ blob }}",
@@ -581,9 +553,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_empty_string_pipes_immediate_eof(self, executor: ScriptExecutor) -> None:
         """An explicit empty string still pipes (sends immediate EOF), unlike omission."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_empty",
-            type="script",
             command=sys.executable,
             args=["-c", _LEN_STDIN],
             stdin="",
@@ -597,9 +568,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_omitted_is_backwards_compatible(self, executor: ScriptExecutor) -> None:
         """Omitting stdin keeps legacy behavior: nothing piped, stdin_bytes is None."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_omitted",
-            type="script",
             command=sys.executable,
             args=["-c", "print('no stdin')"],
         )
@@ -611,9 +581,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_coexists_with_args(self, executor: ScriptExecutor) -> None:
         """stdin and args are orthogonal — both reach the child when set."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_args",
-            type="script",
             command=sys.executable,
             args=[
                 "-c",
@@ -632,9 +601,8 @@ class TestScriptExecutorStdin:
     async def test_stdin_utf8_payload_byte_count(self, executor: ScriptExecutor) -> None:
         """Non-ASCII payloads are UTF-8 encoded; stdin_bytes counts bytes, not chars."""
         payload = "café ☕ 日本語"
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_utf8",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="{{ msg }}",
@@ -656,9 +624,8 @@ class TestScriptExecutorStdin:
         deadlock regression fails fast instead of hanging CI.
         """
         payload = "m" * (4 * 1024 * 1024)  # 4 MB each direction
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_bidi",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="{{ blob }}",
@@ -675,9 +642,8 @@ class TestScriptExecutorStdin:
         ``communicate`` lets asyncio absorb the resulting BrokenPipeError, so the
         step completes with the child's real exit code rather than crashing.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_early_exit",
-            type="script",
             command=sys.executable,
             args=["-c", "import sys; sys.exit(3)"],  # never reads stdin
             stdin="y" * (2 * 1024 * 1024),
@@ -690,9 +656,8 @@ class TestScriptExecutorStdin:
     @pytest.mark.asyncio
     async def test_stdin_timeout_while_writing(self, executor: ScriptExecutor) -> None:
         """Timeout fires cleanly even while a large stdin payload is mid-write."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_timeout",
-            type="script",
             command=sys.executable,
             args=["-c", "import time; time.sleep(30)"],  # sleeps, never drains stdin
             stdin="q" * (4 * 1024 * 1024),
@@ -711,9 +676,8 @@ class TestScriptExecutorStdin:
         ``"\\ud800"``). The strict ``.encode`` must surface a named error, not a
         bare UnicodeEncodeError.
         """
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_bad_utf8",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="{{ bad }}",
@@ -726,9 +690,8 @@ class TestScriptExecutorStdin:
         self, executor: ScriptExecutor
     ) -> None:
         """An undefined variable in stdin fails like command/args (TemplateError)."""
-        agent = AgentDef(
+        agent = ScriptStepDef(
             name="test_stdin_bad_template",
-            type="script",
             command=sys.executable,
             args=["-c", _ECHO_STDIN],
             stdin="{{ does_not_exist }}",

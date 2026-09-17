@@ -42,7 +42,7 @@ from conductor.exceptions import ExecutionError
 from conductor.executor.template import TemplateRenderer
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef
+    from conductor.config.schema import SetStepDef
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ def render_set_value_repr(value: Any) -> str:
 
 
 # Literal alias for the effective output type label. Mirrors the schema's
-# ``AgentDef.output_type`` enumeration so callers (engine event payloads,
+# ``SetStepDef.output_type`` enumeration so callers (engine event payloads,
 # dashboard, JSONL log) can narrow on the same set of strings.
 SetOutputType = Literal["auto", "string", "number", "integer", "boolean", "list", "dict"]
 
@@ -130,7 +130,7 @@ class SetExecutor:
     def __init__(self) -> None:
         self.renderer = TemplateRenderer()
 
-    def execute(self, agent: AgentDef, context: dict[str, Any]) -> SetOutput:
+    def execute(self, agent: SetStepDef, context: dict[str, Any]) -> SetOutput:
         """Render and coerce the step's bindings.
 
         Args:
@@ -149,7 +149,7 @@ class SetExecutor:
                 (undefined variable, syntax error, etc.) — propagated from the
                 renderer.
         """
-        # Both branches are guaranteed by ``AgentDef.validate_agent_type``
+        # Both branches are guaranteed by ``SetStepDef.validate_agent_type``
         # (config/schema.py) — exactly one of value / values is non-None
         # when type == "set".
         if agent.values is not None:

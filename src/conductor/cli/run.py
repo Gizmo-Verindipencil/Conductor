@@ -25,6 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 from conductor.config.loader import load_config
+from conductor.config.schema import AgentDef
 from conductor.console import MarkupFreeConsole, join, make_console, styled
 from conductor.engine.workflow import ExecutionPlan, WorkflowEngine
 from conductor.exceptions import WorkflowTerminated
@@ -2409,7 +2410,9 @@ async def run_workflow_async(
         plugin_marketplaces = await _prefetch_plugin_sources(config, workflow_path)
 
         # Check if workflow uses multiple providers (has per-agent provider overrides)
-        uses_multi_provider = any(agent.provider is not None for agent in config.agents)
+        uses_multi_provider = any(
+            isinstance(agent, AgentDef) and agent.provider is not None for agent in config.agents
+        )
 
         if uses_multi_provider:
             verbose_log("Multi-provider mode: agents use different providers", style="cyan")
@@ -2801,7 +2804,6 @@ def build_dry_run_plan(workflow_path: Path) -> ExecutionPlan:
             return next((a for a in self.config.agents if a.name == name), None)
 
     # Use a real WorkflowEngine but with a mock provider
-    from conductor.config.schema import AgentDef
     from conductor.providers.base import AgentOutput, AgentProvider
 
     class _MockProvider(AgentProvider, abstract=True):
