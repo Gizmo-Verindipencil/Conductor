@@ -26,12 +26,14 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import UsageLimits
 
 from conductor.providers._pydantic_ai.events import (
     emit_compaction_complete,
@@ -610,6 +612,81 @@ def build_tiered_compaction(config: CompactionConfig) -> AbstractCapability[Any]
         TieredCompaction,
     )
 
+    # Workaround for pydantic-ai-harness 0.24.0: the harness summarizer runs
+    # its nested Agent as `agent.run(prompt, usage=ctx.usage)` without
+    # `usage_limits`, so Pydantic AI enforces its own default
+    # `UsageLimits(request_limit=50)` against the parent run's *shared* usage.
+    # An agent configured with `max_agent_iterations` above that default is
+    # therefore always refused a summary once it has made 50 requests — the
+    # summarizing tier degrades to the sliding-window fallback exactly when a
+    # long run needs it most. This subclass has the nested run inherit the
+    # limits the parent run is already enforcing; the summary call still
+    # consumes one shared request slot, so a genuinely exhausted budget still
+    # refuses it. Remove once the minimum pinned harness version passes the
+    # run's `usage_limits` itself.
+    class _RunLimitsInheritingSummarizingCompaction(SummarizingCompaction[Any]):
+        """Summarizing tier whose nested run inherits the parent run's usage limits.
+
+        The body mirrors the upstream ``SummarizingCompaction._summarize``
+        behavior and control flow except for the ``agent.run`` call; keep it in
+        sync with the pinned harness while this workaround lives.
+        """
+
+        async def _summarize(
+            self,
+            messages: list[ModelMessage],
+            ctx: RunContext[Any],
+            *,
+            previous_summary: str | None = None,
+        ) -> str:
+            from pydantic_ai import Agent
+            from pydantic_ai_harness.compaction._shared import is_realtime_model
+            from pydantic_ai_harness.compaction._summarizing_compaction import (
+                _INCREMENTAL_UPDATE_INSTRUCTION,
+                _format_messages,
+            )
+
+            formatted = _format_messages(
+                messages, skip_previous_summary=previous_summary is not None
+            )
+            prompt = self.summary_prompt.format(messages=formatted)
+
+            if previous_summary is not None:
+                prompt = (
+                    f"{prompt}\n\n{_INCREMENTAL_UPDATE_INSTRUCTION}\n\n"
+                    f"<previous-summary>\n{previous_summary}\n</previous-summary>"
+                )
+
+            model = self.model if self.model is not None else ctx.model
+            # Upstream guard: a realtime run must name a summarizer model
+            # explicitly rather than hand Agent a model it cannot run with.
+            if is_realtime_model(model):
+                raise UserError(
+                    "SummarizingCompaction needs a request-response model to write the "
+                    f"summary, but the run uses {type(model).__name__}, which is not one. "
+                    "Set `model=` on SummarizingCompaction to the model to summarize "
+                    "with when the run uses a realtime model."
+                )
+            agent: Agent[None, str] = Agent(
+                cast("Model[Any] | str", model),
+                instructions=(
+                    "You are a context summarization assistant. "
+                    "Extract the most important information from conversations."
+                ),
+            )
+            # The nested run shares the parent's usage, so it must live under
+            # the parent's limits; passing neither makes Pydantic AI apply its
+            # default request_limit=50 to the parent's accumulated usage.
+            # `usage_limits` is None only on a synthetic RunContext with no run
+            # behind it, where an uncapped limits object is the honest default.
+            usage_limits = (
+                ctx.usage_limits
+                if ctx.usage_limits is not None
+                else UsageLimits(request_limit=None)
+            )
+            result = await agent.run(prompt, usage=ctx.usage, usage_limits=usage_limits)
+            return result.output.strip()
+
     # Tier parameters are taken from the plan and from the harness docs:
     # - ClearToolResults keeps the most recent N tool-call/result pairs.
     # - SummarizingCompaction preserves the most recent 20 messages when it
@@ -623,7 +700,7 @@ def build_tiered_compaction(config: CompactionConfig) -> AbstractCapability[Any]
         tier_name="clear_tool_results",
     )
     summarize_tier = _TierWrapper(
-        SummarizingCompaction(max_messages=1, keep_messages=20, model=None),
+        _RunLimitsInheritingSummarizingCompaction(max_messages=1, keep_messages=20, model=None),
         tier_name="summarizing",
     )
     slide_tier = _TierWrapper(
