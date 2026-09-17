@@ -7,6 +7,7 @@ main agent session and dialog turns.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -382,6 +383,65 @@ class TestSessionKwargsPlumbing:
             "base_url": "http://localhost:11434/v1",
             "api_key": "sk-execute",
         }
+
+    @pytest.mark.asyncio
+    async def test_resume_attaches_provider_config(self) -> None:
+        """Resumed sessions must keep the same custom provider routing."""
+        from conductor.config.schema import AgentDef
+
+        s = ProviderSettings(
+            name="copilot",
+            type="openai",
+            wire_api="completions",
+            base_url="http://localhost:11434/v1",
+            api_key="sk-resume",
+        )
+        provider = CopilotProvider(provider_settings=s, model="custom-model")
+        provider._started = True
+
+        session = AsyncMock()
+        session.session_id = "sess-resumed"
+        captured_callback: dict[str, Any] = {}
+
+        def on_event(callback: Any) -> None:
+            captured_callback["cb"] = callback
+
+        session.on = on_event
+
+        async def send(prompt: str) -> None:
+            from types import SimpleNamespace
+
+            def make_event(t: str, content: str = "") -> Any:
+                ev = SimpleNamespace()
+                ev.type = SimpleNamespace(value=t)
+                ev.data = SimpleNamespace(message=content, content=content)
+                return ev
+
+            captured_callback["cb"](make_event("assistant.message", "ok"))
+            captured_callback["cb"](make_event("session.idle"))
+
+        session.send = send
+        session.destroy = AsyncMock()
+
+        client = AsyncMock()
+        client.resume_session = AsyncMock(return_value=session)
+        client.create_session = AsyncMock()
+        provider._client = client
+        provider.set_resume_session_ids({"solo": "sess-old"})
+        provider.set_resume_session_cwds({"solo": os.getcwd()})
+
+        agent = AgentDef(name="solo", model="custom-model", prompt="hi")
+        await provider.execute(agent, context={}, rendered_prompt="hi")
+
+        client.resume_session.assert_called_once()
+        kwargs = client.resume_session.call_args.kwargs
+        assert kwargs["provider"] == {
+            "type": "openai",
+            "wire_api": "completions",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "sk-resume",
+        }
+        client.create_session.assert_not_called()
 
 
 class TestDescribeProviderRedaction:

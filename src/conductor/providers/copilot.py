@@ -745,9 +745,9 @@ class CopilotProvider(AgentProvider):
     def _apply_provider_config(self, session_kwargs: dict[str, Any]) -> None:
         """Attach the resolved SDK provider config to ``session_kwargs``.
 
-        Called from every ``create_session`` site (main agent execution and
-        dialog turns) so all sessions for this provider instance hit the
-        same endpoint.
+        Called from every ``create_session`` / ``resume_session`` site (main
+        agent execution and dialog turns) so all sessions for this provider
+        instance hit the same endpoint.
         """
         provider_cfg = self._resolve_sdk_provider_config()
         if provider_cfg is not None:
@@ -1380,6 +1380,7 @@ class CopilotProvider(AgentProvider):
                             resume_kwargs["skill_directories"] = list(skill_directories)
                         if custom_agents:
                             resume_kwargs["custom_agents"] = [dict(spec) for spec in custom_agents]
+                        self._apply_provider_config(resume_kwargs)
                         self._apply_github_token(resume_kwargs)
                         session = await self._client.resume_session(resume_sid, **resume_kwargs)
                         logger.info(
