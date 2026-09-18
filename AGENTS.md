@@ -66,19 +66,29 @@ uv run conductor validate examples/simple-qa.yaml
 make validate-examples    # validate all examples
 ```
 
+## Changelog
+
+Conductor uses [towncrier](https://towncrier.readthedocs.io/) to manage changelog entries without merge conflicts. Fragment files are collected in `changelog.d/` and compiled during releases. Five normative rules apply to every agent and contributor:
+
+1. **Add a fragment for user-facing changes.** Every PR with a user-facing change MUST add exactly one fragment file under `changelog.d/` following the contract in [`changelog.d/README.md`](changelog.d/README.md).
+2. **NEVER edit `CHANGELOG.md` in feature or fix PRs.** Towncrier compiles `CHANGELOG.md` only during release preparation.
+3. **Naming is free-form.** Use the issue number when known (e.g. `392.added.md`, which towncrier renders as clickable `(#392)`), or any descriptive slug starting with `+` (e.g. `+otel-mcp-spans.added.md`). NEVER rename a fragment after opening the PR because the filename is cosmetic once validated. The only hard rule is towncrier syntax: non-numeric names must start with `+`, and the category must be one of `added`, `fixed`, `changed`, or `removed`.
+4. **CI enforces the contract.** The `Changelog` CI workflow validates fragment presence and syntax on every pull request, reporting actionable instructions on failure.
+5. **Exemptions require a maintainer label.** Trivial, internal, or bootstrap changes without user-facing impact are exempted by a maintainer applying the `changelog-not-required` label (not by author judgment). The label provides a full exemption that waives both the fragment requirement and the `CHANGELOG.md` edit prohibition, but any fragments present are still validated.
+
 ## Releasing
 
 Releases are tag-triggered: pushing a `v*` tag runs
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which lints,
 typechecks, tests (Python 3.12 + 3.13), builds the package, and creates a GitHub
-Release with artifacts and auto-generated notes. The maintainer prepares a
-release-prep PR (`chore(release): cut X.Y.Z`) that bumps `version` in
-`pyproject.toml`, finalizes `CHANGELOG.md` (Unreleased → versioned section), and
-re-locks `uv.lock` (`uv lock`); after it merges, tag the merge commit on `main`
-and push the tag. The version lives only in `pyproject.toml` (read at runtime via
-`importlib.metadata`); there is no separate `__version__` to edit. The default
-bump is the patch ("build") number. See
-[`docs/release-checklist.md`](docs/release-checklist.md) for the full
+Release with artifacts and curated release notes extracted from `CHANGELOG.md`.
+The maintainer prepares a release-prep PR (`chore(release): cut X.Y.Z`) that bumps
+`version` in `pyproject.toml`, runs `make changelog-build VERSION=X.Y.Z` to compile
+`changelog.d/` fragments into `CHANGELOG.md`, and re-locks `uv.lock` (`uv lock`).
+After it merges, tag the merge commit on `main` and push the tag. The version lives
+only in `pyproject.toml` (read at runtime via `importlib.metadata`); there is no
+separate `__version__` to edit. The default bump is the patch ("build") number.
+See [`docs/release-checklist.md`](docs/release-checklist.md) for the full
 step-by-step checklist.
 
 ## Architecture

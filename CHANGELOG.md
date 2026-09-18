@@ -5,80 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/microsoft/conductor/compare/v0.1.37...HEAD)
+## [Unreleased]
 
-### Added
+Pending changes are collected as fragment files in [`changelog.d/`](changelog.d/)
+and compiled into this file at release time.
 
-- **Direct MCP workflow steps (`type: mcp`)** (#392): calls a tool on a
-  configured `runtime.mcp_servers` stdio server directly without an LLM.
-  Arguments are rendered recursively with Jinja2 and auto-coerced to
-  JSON-native types; the result envelope (`content`, `structured`, `is_error`)
-  merges structured keys directly onto the output dict so routes and downstream
-  steps can branch on `output.is_error` or individual fields. Calls serialize
-  per server process to maintain stdio stream integrity while distinct servers
-  execute concurrently in parallel groups. Output text payload is bounded by
-  `runtime.tool_output` with spill-to-file support while structured data is
-  preserved intact. Step and result values are excluded from all lifecycle
-  events (`mcp_started`, `mcp_completed`, `mcp_failed`), with failure messages
-  redacted to a safe category and full exception traces written only to a
-  private per-run `*.mcp-diagnostics.log` file (named by the redacted
-  message). See
-  [`docs/workflow-syntax.md`](docs/workflow-syntax.md#mcp-steps) and
-  [`examples/mcp-step.yaml`](examples/mcp-step.yaml).
-- **OpenTelemetry spans for direct MCP workflow steps**: each `type: mcp`
-  execution is exported as an `execute_tool` span under its workflow, parallel
-  group, or for-each item. Spans include bounded server, tool, result-size, and
-  truncation metadata without recording arguments, result contents, or spill
-  paths, and preserve routed tool errors, execution failures, and interrupted
-  attempts as distinct outcomes.
-
-### Fixed
-
-- **Pydantic AI structured-output agents explicitly require `final_result`** —
-  the generated output tool now tells models that they must call it before
-  finishing and that plain-text responses are not accepted. This improves
-  adherence for local models behind OpenAI- or Anthropic-compatible endpoints
-  without replacing tool-based output, weakening schema validation, or
-  changing authored system prompts.
-
-- **Summarizing context compaction no longer degrades on long agent runs** —
-  the nested summarization call now inherits the run's `usage_limits` instead
-  of falling back to Pydantic AI's default `request_limit=50`. With
-  pydantic-ai-harness 0.24.0 the summarizer shared the parent run's usage but
-  not its limits, so an agent configured with `max_agent_iterations` above 50
-  was refused a summary once it had made 50 requests — the tier silently
-  degraded to the sliding-window fallback exactly when a long run needed real
-  summarization, and the under-compacted history could then exceed the
-  model's context window and fail the run with an HTTP 400. The summary call
-  still consumes one shared request slot, so a genuinely exhausted budget
-  still refuses it.
-
-### Changed
-
-- **Step definitions split into concrete models with a discriminated union**
-  (#517) — the single monolithic `AgentDef` that carried every step type's
-  fields is now a set of focused Pydantic models: `AgentDef` (provider-backed
-  LLM agents only), `HumanGateStepDef`, `QuestionsStepDef`, `ScriptStepDef`,
-  `MCPStepDef`, `WaitStepDef`, `SetStepDef`, `TerminateStepDef`, and
-  `WorkflowStepDef`, united by the static `StepDef` union discriminated on
-  `type`. Every model owns exactly the fields meaningful for its kind with
-  `extra="forbid"`, so a misplaced field is rejected next to its step instead
-  of being silently ignored, and the published JSON Schema now exposes a
-  `oneOf` + `discriminator` mapping with per-variant
-  `additionalProperties: false` for editors and tooling. Compatibility:
-  workflow YAML is unchanged — an omitted `type` or an explicit `type: null`
-  still loads as an LLM agent (now canonicalized to `type: "agent"` at parse
-  time) — and `AgentDef(...)` keeps working for LLM agents, including
-  `AgentDef(type=None, ...)`. What changed: constructing a non-LLM step
-  programmatically via `AgentDef(type="script", ...)` no longer works — use
-  the named step class (e.g. `ScriptStepDef(...)`) — and a field that belongs
-  to a different step type now fails with Pydantic's standard
-  `extra_forbidden` error rather than the previous custom
-  `"<type> agents cannot have '<field>'"` messages. Human gates additionally
-  lost the inert `model` field and can no longer appear as a `for_each`
-  inline agent (concurrent iterations would compete for one interactive
-  channel; route to a gate from the group's `routes:` instead). All classes
-  are exported from `conductor.config` and `conductor.config.schema`.
+<!-- towncrier release notes start -->
 
 ## [0.1.37](https://github.com/microsoft/conductor/compare/v0.1.36...v0.1.37) - 2026-09-09
 

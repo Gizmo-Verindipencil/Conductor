@@ -151,3 +151,34 @@ markers = [
     "real_api: marks tests that make real API calls to external services (deselect with '-m \"not real_api\"')",
     "install_scripts: marks tests that exercise install.ps1/install.sh end-to-end (slow; opt-in via '-m install_scripts')",
 ]
+
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->"
+title_format = "## [{version}] - {project_date}"
+# The default markdown template already wraps the issue in parentheses,
+# so `issue_format = "#{issue}"` renders as `(#392)`.
+# Using `"(#{issue})"` would render `((#392))`.
+issue_format = "#{issue}"
+wrap = false
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true

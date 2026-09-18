@@ -285,6 +285,14 @@ jobs:
         run: |
           ls -la dist/
           uv run python -m zipfile -l dist/*.whl
+          # changelog.d/ also lands in the sdist by default — harmless, and
+          # it does not change the wheel contents.
+          SDIST_LIST="$RUNNER_TEMP/sdist-contents.txt"
+          tar -tf dist/*.tar.gz > "$SDIST_LIST"
+          if ! grep -q 'CHANGELOG.md$' "$SDIST_LIST"; then
+            echo "::error::CHANGELOG.md missing from sdist tarball (dist/*.tar.gz)"
+            exit 1
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

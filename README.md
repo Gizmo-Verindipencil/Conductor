@@ -643,10 +643,18 @@ To submit a pull request, follow these steps:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Run tests and checks (`make test && make check`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+4. Add a changelog fragment in `changelog.d/` if your change is user-facing (see below)
+5. Run tests and checks (`make test && make check`)
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
+
+<a id="changelog"></a>
+### Changelog fragments
+
+Every pull request with user-facing changes must include a changelog fragment under `changelog.d/`. Never edit `CHANGELOG.md` directly in a pull request. Maintainers can apply the `changelog-not-required` label to exempt trivial, internal, or bootstrap changes from both the fragment requirement and the `CHANGELOG.md` edit prohibition (any fragments present are still validated).
+
+Name your fragment `<issue>.<category>.md` (e.g. `392.added.md`) or `+<slug>.<category>.md` (e.g. `+my-feature.added.md`), where category is one of `added`, `fixed`, `changed`, or `removed`. See [`changelog.d/README.md`](changelog.d/README.md) for the full fragment contract and examples.
 
 ## Trademarks
 

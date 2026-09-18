@@ -1,4 +1,4 @@
-.PHONY: install install-cli dev test test-cov lint format typecheck check clean build all build-frontend dev-frontend test-frontend
+.PHONY: install install-cli dev test test-cov lint format typecheck check clean build all build-frontend dev-frontend test-frontend changelog-draft changelog-build
 
 # Default target
 all: check test
@@ -65,6 +65,17 @@ validate-examples:
 		echo "Validating $$file..."; \
 		uv run conductor validate "$$file" || exit 1; \
 	done
+
+# Preview unreleased changelog notes compiled from changelog.d/ fragments
+changelog-draft:
+	$(if $(strip $(VERSION)),,$(error VERSION is required (e.g. make changelog-draft VERSION=0.1.38)))
+	uvx --from towncrier==25.8.0 towncrier build --draft --version $(VERSION)
+
+# Compile changelog fragments into CHANGELOG.md and delete consumed fragment files.
+# Note: towncrier removes consumed fragments (via git rm or file deletion); run only in a release-prep PR.
+changelog-build:
+	$(if $(strip $(VERSION)),,$(error VERSION is required (e.g. make changelog-build VERSION=0.1.38)))
+	uvx --from towncrier==25.8.0 towncrier build --version $(VERSION) --yes
 
 # Build frontend dashboard (output to src/conductor/web/static/)
 build-frontend:

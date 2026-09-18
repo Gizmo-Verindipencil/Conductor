@@ -1,0 +1,58 @@
+# Changelog fragment contract enforcement for pull requests.
+#
+# Every PR adds a towncrier fragment in changelog.d/ instead of editing
+# CHANGELOG.md (feature/fix PRs), or compiles the fragments into CHANGELOG.md
+# (release-prep PRs, detected by a pyproject.toml version bump). See
+# changelog.d/README.md for the naming contract this job enforces.
+#
+# Fork-safe by construction: `pull_request` (never `pull_request_target`),
+# `contents: read` only, no secrets. This workflow requests read-only
+# permissions and avoids invoking checked-out application code. The
+# release-notes extractor is loaded from the base branch rather than the PR's
+# checkout. The workflow definition itself is still under PR control, though —
+# a modified workflow file could still run arbitrary steps.
+#
+# The gate itself lives in .github/scripts/enforce-changelog-contract.sh so
+# the exact logic that runs here also runs under
+# tests/test_integration/test_changelog_gate.py.
+#
+# The job NAME (`Changelog`) is the branch-protection required-check key —
+# required checks key on the job name, not the workflow name.
+
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Enforce changelog fragment contract
+        shell: bash
+        env:
+          # Labels arrive as a JSON array, e.g. ["changelog-not-required"].
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_REF: ${{ github.base_ref }}
+        run: bash .github/scripts/enforce-changelog-contract.sh
