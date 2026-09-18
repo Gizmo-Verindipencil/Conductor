@@ -21,10 +21,11 @@ just as they do at the source.
     <base>/<registry>/<sha[:12]>/<repo_path>            # mirrored repo files
     <base>/<registry>/_meta/<sha[:12]>/source.json      # cache metadata
     <base>/<registry>/_meta/<sha[:12]>/index.yaml       # cached registry index
-    <base>/<registry>/_meta/<sha[:12]>/<workflow>.complete  # readiness sentinel
+    <base>/<registry>/_meta/<sha[:12]>/workflows/<workflow>.complete  # readiness sentinel
     <base>/<registry>/_meta/<sha[:12]>/tools.json       # SHA-keyed parse cache
     <base>/<registry>/_meta/<sha[:12]>/tools.complete   # parse-cache sentinel
     <base>/<registry>/_meta/_refs/<ref-slug>.json       # last SHA a floating ref had
+    <base>/<registry>/_meta/<sha[:12]>/.lock            # cross-process fetch lock
 
 For ad-hoc references (``workflow@owner/repo#ref``) the registry namespace
 is ``_adhoc/<owner>/<repo>`` so adhoc caches are isolated from named
@@ -39,8 +40,42 @@ never collide with a real ``.conductor/`` (or any other) directory in the
 source repo.
 
 A workflow is considered "fully cached" only when its readiness sentinel
-file exists (written **last** during a fetch). This prevents readers from
-observing a partially populated workflow during a concurrent fetch.
+file exists **and** carries a payload naming the current
+:data:`CACHE_LAYOUT_VERSION` (written **last** during a fetch, after every
+file in the workflow's containing directory has been promoted and the
+registry metadata/index have been persisted). This prevents readers from
+observing a partially populated workflow during a concurrent fetch, and
+also means an empty or version-mismatched marker left over from an older
+Conductor is treated as a cache miss rather than a stale hit — see
+"Recursive asset acquisition" below for why the marker's *content*, not
+merely its presence, has to be checked.
+
+Recursive asset acquisition and the failure contract
+=====================================================
+
+A GitHub-registry fetch acquires **every regular file** beneath the
+workflow's containing directory (recursively, via the Git Trees API — see
+:func:`conductor.registry.github.list_files_recursive`), not just the
+workflow file and its immediate siblings. This is what makes a workflow
+whose ``prompt: !file`` (or a ``type: script`` step's data file) lives a
+few directories below the workflow YAML resolve correctly once cached,
+without conductor having to parse the workflow first to discover which
+nested files it actually references — a workflow can reach a data file via
+a script, a Jinja include, or any other indirection the loader never sees.
+Symlinks and submodules are not followed.
+
+The fetch is **strictly all-or-nothing**: a failure listing any
+subdirectory, downloading any regular file (including one the workflow
+never actually uses), staging into the temporary directory, or promoting a
+staged file into the shared SHA root aborts the whole fetch with a
+:class:`~conductor.registry.errors.RegistryError` naming the failing
+repository, directory, or file. Readiness is only published — the
+sentinel written — once the *entire* selected subtree has been acquired.
+There is no best-effort partial fetch and no silently-skipped sibling.
+
+Because a root-level workflow's "containing directory" is the repository
+root, recursion for such a workflow acquires the entire repository tree.
+Dedicated workflow directories keep acquisition scoped and fast.
 
 Offline resolution and the parse cache
 =======================================
@@ -74,7 +109,10 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -82,7 +120,7 @@ from typing import TYPE_CHECKING
 from conductor.config.schema import InputDef, McpConfig
 from conductor.registry.config import RegistryEntry, RegistryType
 from conductor.registry.errors import RegistryError
-from conductor.registry.github import fetch_file, list_directory, parse_github_source
+from conductor.registry.github import fetch_file, list_files_recursive, parse_github_source
 from conductor.registry.index import RegistryIndex, WorkflowInfo, load_index, parse_index_text
 from conductor.registry.version_resolver import materialize_to_sha, resolve_ref
 
@@ -91,6 +129,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+if sys.platform == "win32":
+    import msvcrt
+
+    fcntl = None
+else:
+    import fcntl
+
+    msvcrt = None
+
 # Reserved cache namespaces. Cannot collide with named registries because
 # configured registry names are not allowed to contain '/' and these names
 # start with '_'.
@@ -98,11 +145,32 @@ _ADHOC_NAMESPACE = "_adhoc"
 _META_NAMESPACE = "_meta"
 _REFS_NAMESPACE = "_refs"
 
+# Per-workflow readiness markers live in their own subdirectory of the meta
+# dir rather than directly alongside registry-level metadata files
+# (tools.json/tools.complete, source.json, index.yaml). Workflow names are
+# arbitrary registry-index keys an author controls, so a workflow literally
+# named "tools" would otherwise collide with the SHA-keyed parse cache's own
+# "tools.complete" sentinel — save_parsed_tools() would silently overwrite
+# that workflow's readiness marker with an empty-string payload, or vice
+# versa, and _is_workflow_ready()/load_parsed_tools() would each misread the
+# other's marker.
+_WORKFLOWS_META_NAMESPACE = "workflows"
+
 # Current on-disk cache layout version. Bumping this invalidates all existing
 # caches (their source.json will fail validation and the entries are re-fetched).
 # v3: ParsedToolInfo (tools.json) gained a `name` field carrying the workflow's
 # declared WorkflowDef.name, so a tier-2 cache hit doesn't lose FR3 naming.
-CACHE_LAYOUT_VERSION = 3
+# v4: per-workflow fetches acquire every regular file recursively beneath the
+# workflow's containing directory (issue #530), not just the workflow file and
+# its immediate siblings. A version-3 cache only ever populated the shallow
+# sibling set, so it must not be mistaken for a fully-acquired subtree —
+# see `_workflow_readiness_marker` / `_is_workflow_ready` below, which check
+# the per-workflow `.complete` marker's *content* (not merely its presence)
+# for exactly this reason: `mcp/serve/catalogue.py::_resolve_registry_index`
+# can refresh a registry's `source.json`/`index.yaml` (bumping the recorded
+# layout version) without ever calling `fetch_workflow`, so relying on
+# `source.json` alone could resurrect a stale version-3 marker as "ready".
+CACHE_LAYOUT_VERSION = 4
 
 _SHA_DIR_RE = re.compile(r"^[0-9a-f]{12}$")
 _FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -147,11 +215,125 @@ def _meta_dir(registry_name: str, sha: str) -> Path:
     return _registry_root(registry_name) / _META_NAMESPACE / sha[:12]
 
 
+def _cache_lock_path(registry_name: str, sha: str) -> Path:
+    """Return the lock file path guarding cache mutations for a registry+SHA."""
+    return _meta_dir(registry_name, sha) / ".lock"
+
+
+@contextlib.contextmanager
+def _cache_write_lock(registry_name: str, sha: str) -> Iterator[None]:
+    """Cross-process advisory lock guarding cache mutations for one registry+SHA.
+
+    Held from stale-metadata invalidation through readiness-marker
+    publication so two concurrent fetchers for the same registry+SHA — even
+    in separate processes — cannot interleave. Without this, a slower
+    fetcher that misses the cache can invalidate or clobber a faster
+    sibling's just-published, fully-valid readiness marker (or the metadata
+    it depends on) before observing that the sibling already finished; a
+    subsequent failure in the slower fetcher then leaves no valid cache
+    entry at all, even though one briefly existed.
+
+    Uses an OS-level advisory lock (``fcntl.flock`` on POSIX,
+    ``msvcrt.locking`` on Windows) on a dedicated lock file rather than a
+    lock-directory/PID-file scheme, so the lock is automatically released
+    by the OS if the holding process dies or is killed — a crash can never
+    leave a stale lock blocking every future fetch for that registry+SHA.
+    """
+    lock_path = _cache_lock_path(registry_name, sha)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        if msvcrt is not None:
+            # msvcrt.locking() locks byte ranges of the CRT-level file, which
+            # requires at least one byte to exist; LK_LOCK blocks internally
+            # (raising and retrying) until the lock is acquired.
+            with contextlib.suppress(OSError):
+                os.write(fd, b"\0")
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if msvcrt is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _sentinel_path(registry_name: str, sha: str, workflow_name: str) -> Path:
-    """Return the readiness sentinel for a single workflow within a SHA dir."""
+    """Return the readiness sentinel for a single workflow within a SHA dir.
+
+    Lives under a dedicated ``workflows/`` subdirectory of the meta dir so a
+    workflow named e.g. ``tools`` can never collide with the SHA-keyed parse
+    cache's own ``tools.complete`` sentinel (or any other registry-level
+    metadata file that lives directly in the meta dir).
+    """
     # workflow_name is a registry index key; sanitize for filesystem use.
     safe = workflow_name.replace("/", "_").replace("\\", "_")
-    return _meta_dir(registry_name, sha) / f"{safe}.complete"
+    return _meta_dir(registry_name, sha) / _WORKFLOWS_META_NAMESPACE / f"{safe}.complete"
+
+
+def _readiness_marker_payload() -> str:
+    """Return the versioned payload written to a per-workflow ``.complete`` sentinel."""
+    return json.dumps({"cache_layout_version": CACHE_LAYOUT_VERSION}, sort_keys=True)
+
+
+def _write_readiness_marker(sentinel: Path) -> None:
+    """Atomically write the versioned readiness marker for a workflow.
+
+    Unlike the pre-v4 marker (an empty file whose mere *presence* meant
+    "ready"), the payload names the :data:`CACHE_LAYOUT_VERSION` that
+    produced it. This lets :func:`_is_workflow_ready` distinguish a fully
+    recursive v4 fetch from an older Conductor's shallow-siblings fetch —
+    which left an empty marker behind — even when a metadata-only refresh
+    (``mcp/serve/catalogue.py::_resolve_registry_index``) has already
+    bumped ``source.json`` to the current layout version without ever
+    re-running :func:`_fetch_github`.
+    """
+    _atomic_write_text(sentinel, _readiness_marker_payload())
+
+
+def _is_workflow_ready(sentinel: Path) -> bool:
+    """Return ``True`` only if *sentinel* exists and names the current layout version.
+
+    An empty marker (pre-v4), one from a different layout version, or one
+    that fails to parse is treated as a cache miss rather than a stale hit.
+    """
+    try:
+        text = sentinel.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return False
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and data.get("cache_layout_version") == CACHE_LAYOUT_VERSION
+
+
+def _invalidate_readiness_marker(sentinel: Path) -> None:
+    """Remove a workflow's readiness marker before rebuilding its cache entry.
+
+    Best-effort: a marker that fails to delete (already absent, or a
+    transient filesystem error) does not block the fetch that is about to
+    overwrite the files it used to certify. Called *before* staging or
+    promotion begins so a concurrent reader can never observe a stale
+    marker (from an older layout version, or from this same workflow's
+    previous fetch) while this fetch is overwriting the mirrored files it
+    describes in place.
+    """
+    with contextlib.suppress(OSError):
+        sentinel.unlink()
 
 
 def _tools_cache_path(registry_name: str, sha: str) -> Path:
@@ -539,7 +721,10 @@ def get_cached_workflow_path(
     A workflow is considered fully cached when:
 
     1. The per-workflow readiness sentinel
-       (``_meta/<sha>/<workflow_name>.complete``) exists.
+       (``_meta/<sha>/<workflow_name>.complete``) exists **and** names the
+       current :data:`CACHE_LAYOUT_VERSION` (see :func:`_is_workflow_ready`)
+       — an empty or version-mismatched marker left over from an older
+       Conductor is a miss, not a stale hit.
     2. The workflow file itself exists at the expected mirrored path.
 
     When ``workflow_repo_path`` is omitted, this falls back to looking up the
@@ -559,7 +744,7 @@ def get_cached_workflow_path(
         ``Path`` to the cached workflow YAML, or ``None`` when not cached.
     """
     sentinel = _sentinel_path(registry_name, sha, workflow_name)
-    if not sentinel.is_file():
+    if not _is_workflow_ready(sentinel):
         return None
 
     repo_path = workflow_repo_path
@@ -617,6 +802,34 @@ def _resolve_sha_offline(registry_name: str, ref: str | None) -> str:
     )
 
 
+def _try_cached_workflow_hit(
+    registry_name: str, registry_entry: RegistryEntry, workflow_name: str, sha: str
+) -> Path | None:
+    """Return the cached workflow path if a valid, ready cache entry exists.
+
+    Read-only — requires matching source metadata, a cached index naming
+    *workflow_name*, and a readiness marker naming the current cache layout
+    version (see :func:`get_cached_workflow_path`). Used both for the fast
+    uncontended check in :func:`fetch_workflow` and, after acquiring
+    :func:`_cache_write_lock`, to detect that a concurrent fetcher already
+    published the exact entry this call needs — so a slower caller reuses
+    it instead of re-fetching or invalidating it.
+    """
+    meta = _meta_dir(registry_name, sha)
+    metadata = _read_source_metadata(meta)
+    if not _metadata_matches(metadata, registry_entry, sha):
+        return None
+    index = _load_cached_index(meta)
+    if index is None or workflow_name not in index.workflows:
+        return None
+    return get_cached_workflow_path(
+        registry_name,
+        workflow_name,
+        sha,
+        workflow_repo_path=index.workflows[workflow_name].path,
+    )
+
+
 def fetch_workflow(
     registry_name: str,
     registry_entry: RegistryEntry,
@@ -635,12 +848,14 @@ def fetch_workflow(
 
     1. Resolve ``ref`` (or "latest") to a concrete git ref name and
        materialize to an immutable commit SHA.
-    2. If the source metadata already matches and the per-workflow sentinel
-       is present, return the cached path.
+    2. If the source metadata already matches and the per-workflow readiness
+       marker names the current cache layout version, return the cached
+       path.
     3. Otherwise, load the index pinned to the SHA (preferring the cached
-       copy under ``_meta/<sha>/index.yaml``), fetch the workflow + sibling
-       files into a staging dir, atomically promote each file into the
-       shared SHA root, and finally write the readiness sentinel.
+       copy under ``_meta/<sha>/index.yaml``), recursively fetch every
+       regular file beneath the workflow's containing directory into a
+       staging dir, atomically promote each file into the shared SHA root,
+       and finally write the readiness marker.
 
     Args:
         registry_name: Configured registry name.
@@ -666,9 +881,11 @@ def fetch_workflow(
 
     Raises:
         RegistryError: On fetch failure, missing workflow, cache miss while
-            ``allow_network=False``, or I/O errors. Failures fetching
-            sibling files in the same directory are silently swallowed
-            (best-effort) — only the workflow file itself must succeed.
+            ``allow_network=False``, or an I/O error. A failure listing or
+            downloading *any* regular file beneath the workflow's
+            containing directory — including one the workflow does not
+            itself reference — aborts the whole fetch; there is no
+            best-effort partial acquisition.
     """
     # Path registries: read directly from source. resolve_ref raises if a
     # ref was supplied, propagating a clear error to the caller. No network
@@ -706,31 +923,10 @@ def fetch_workflow(
     else:
         sha = _resolve_sha_offline(registry_name, ref)
 
-    meta = _meta_dir(registry_name, sha)
-    metadata = _read_source_metadata(meta)
-    matches = _metadata_matches(metadata, registry_entry, sha)
-
-    # Try the cache first: requires matching metadata, sentinel present, and
-    # the workflow file present at its mirrored path.
-    if matches:
-        index = _load_cached_index(meta)
-        if index is not None and workflow_name in index.workflows:
-            cached = get_cached_workflow_path(
-                registry_name,
-                workflow_name,
-                sha,
-                workflow_repo_path=index.workflows[workflow_name].path,
-            )
-            if cached is not None:
-                return cached
-    elif allow_network:
-        # Stale or missing metadata — clear the meta dir to avoid serving an
-        # inconsistent index/source on a subsequent miss. Don't touch the SHA
-        # mirror itself; new fetches will overwrite content-addressed files.
-        # Left untouched when offline: there is nothing else to try, and an
-        # offline caller should not be able to destroy cache state.
-        if metadata is not None:
-            shutil.rmtree(meta, ignore_errors=True)
+    # Fast, uncontended check: no lock needed for a pure read.
+    cached = _try_cached_workflow_hit(registry_name, registry_entry, workflow_name, sha)
+    if cached is not None:
+        return cached
 
     if not allow_network:
         raise RegistryError(
@@ -742,45 +938,79 @@ def fetch_workflow(
             ),
         )
 
-    # Fetch the index from the upstream registry (pinned to SHA) and persist it.
-    index = load_index(registry_entry, ref=sha)
-    if workflow_name not in index.workflows:
-        raise RegistryError(
-            f"Workflow '{workflow_name}' not found in registry '{registry_name}'",
-            suggestion=f"Run 'conductor registry list {registry_name}' to see available workflows.",
-        )
-    workflow_info = index.workflows[workflow_name]
-    safe_path = _safe_repo_path(workflow_info.path)
+    # Every step from here on mutates shared cache state (metadata
+    # invalidation, the workflow's readiness marker, the SHA-rooted file
+    # mirror), so it is serialized per registry+SHA: two concurrent
+    # fetchers for the same workflow must never interleave, and a slower
+    # one must never invalidate or clobber what a faster one already
+    # published.
+    with _cache_write_lock(registry_name, sha):
+        # Re-check now that we hold the lock: another process may have
+        # completed this exact fetch (or refreshed stale metadata) while we
+        # were waiting for it, in which case we reuse that result instead of
+        # racing it or invalidating what it just published.
+        cached = _try_cached_workflow_hit(registry_name, registry_entry, workflow_name, sha)
+        if cached is not None:
+            return cached
 
-    sha_root = _sha_dir(registry_name, sha)
-    sha_root.mkdir(parents=True, exist_ok=True)
+        meta = _meta_dir(registry_name, sha)
+        metadata = _read_source_metadata(meta)
+        matches = _metadata_matches(metadata, registry_entry, sha)
+        if not matches and metadata is not None:
+            # Stale or missing metadata — clear the meta dir to avoid serving
+            # an inconsistent index/source on a subsequent miss. Don't touch
+            # the SHA mirror itself; new fetches will overwrite
+            # content-addressed files.
+            shutil.rmtree(meta, ignore_errors=True)
 
-    # Stage everything in a temp dir under the meta dir (intra-filesystem, so
-    # per-file os.replace into sha_root is atomic).
-    meta.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp(prefix=f".tmp-{workflow_name}-", dir=meta))
-    try:
-        _fetch_github(registry_entry, str(safe_path), sha, tmp_dir)
-        _promote_staged_files(tmp_dir, sha_root)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Fetch the index from the upstream registry (pinned to SHA) and persist it.
+        index = load_index(registry_entry, ref=sha)
+        if workflow_name not in index.workflows:
+            raise RegistryError(
+                f"Workflow '{workflow_name}' not found in registry '{registry_name}'",
+                suggestion=(
+                    f"Run 'conductor registry list {registry_name}' to see available workflows."
+                ),
+            )
+        workflow_info = index.workflows[workflow_name]
+        safe_path = _safe_repo_path(workflow_info.path)
 
-    # Persist metadata + cached index, then write the readiness sentinel
-    # **last** so concurrent readers never observe a partial fetch.
-    _write_source_metadata(meta, registry_entry, sha)
-    _save_cached_index(meta, _index_to_yaml(index))
+        sentinel = _sentinel_path(registry_name, sha, workflow_name)
+        # Invalidate any existing readiness marker *before* rebuilding — a
+        # concurrent reader must never observe an older-version (or otherwise
+        # stale) marker while this fetch is overwriting the mirrored files it
+        # describes in place. Safe under the lock: any marker still present
+        # here was not published by a sibling we already deferred to above.
+        _invalidate_readiness_marker(sentinel)
 
-    workflow_path = _resolve_within(sha_root, safe_path)
-    if not workflow_path.is_file():
-        raise RegistryError(
-            f"Workflow file '{safe_path}' not found in cache after fetch",
-            suggestion="The registry index may reference a file that does not exist.",
-        )
+        sha_root = _sha_dir(registry_name, sha)
+        sha_root.mkdir(parents=True, exist_ok=True)
 
-    sentinel = _sentinel_path(registry_name, sha, workflow_name)
-    _atomic_write_text(sentinel, "")
+        # Stage everything in a temp dir under the meta dir (intra-filesystem,
+        # so per-file os.replace into sha_root is atomic).
+        meta.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f".tmp-{workflow_name}-", dir=meta))
+        try:
+            _fetch_github(registry_entry, str(safe_path), sha, tmp_dir)
+            _promote_staged_files(tmp_dir, sha_root)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    return workflow_path
+        # Persist metadata + cached index, then write the readiness marker
+        # **last** so concurrent readers never observe a partial fetch.
+        _write_source_metadata(meta, registry_entry, sha)
+        _save_cached_index(meta, _index_to_yaml(index))
+
+        workflow_path = _resolve_within(sha_root, safe_path)
+        if not workflow_path.is_file():
+            raise RegistryError(
+                f"Workflow file '{safe_path}' not found in cache after fetch",
+                suggestion="The registry index may reference a file that does not exist.",
+            )
+
+        _write_readiness_marker(sentinel)
+
+        return workflow_path
 
 
 def fetch_workflow_adhoc(
@@ -1045,54 +1275,85 @@ def _fetch_github(
     sha: str,
     dest_dir: Path,
 ) -> None:
-    """Fetch a workflow and its sibling files from a GitHub registry into a staging dir.
+    """Recursively fetch every regular file beneath the workflow's containing
+    directory from a GitHub registry into a staging dir.
 
-    Files are written into ``dest_dir`` preserving the workflow's repo
-    parent directory. For example, fetching ``sdd-plan/plan.yaml`` writes::
+    Files are written into ``dest_dir`` preserving the full repository-
+    relative layout. For example, fetching ``sdd-plan/plan.yaml`` (with a
+    nested ``prompts/`` and ``scripts/`` beneath ``sdd-plan/``) writes::
 
         <dest_dir>/sdd-plan/plan.yaml
-        <dest_dir>/sdd-plan/<sibling files>
+        <dest_dir>/sdd-plan/prompts/plan.md
+        <dest_dir>/sdd-plan/scripts/run.sh
+
+    This is strictly all-or-nothing (issue #530): listing the directory
+    tree or downloading any regular file within it — including one the
+    workflow itself never references — raises :class:`RegistryError` and
+    aborts the whole fetch. There is no best-effort partial acquisition,
+    and unlisted/malformed entries are never silently skipped.
 
     Args:
         registry_entry: Registry entry with ``source`` as ``owner/repo``.
         workflow_path: Validated repo-relative path to the workflow YAML.
         sha: Immutable commit SHA to fetch at.
         dest_dir: Local staging directory to write files into.
+
+    Raises:
+        RegistryError: If the containing directory cannot be listed, the
+            workflow itself is not a regular file in the enumerated
+            subtree, or any regular file fails to download.
     """
     owner, repo = parse_github_source(registry_entry.source)
     workflow_p = PurePosixPath(workflow_path)
     parent_dir = workflow_p.parent  # PurePosixPath('.') for repo-root workflows
-    workflow_filename = workflow_p.name
-
-    # Fetch the workflow file itself (returns bytes)
-    content = fetch_file(owner, repo, workflow_path, ref=sha)
-    target_dir = dest_dir if str(parent_dir) == "." else dest_dir / parent_dir
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / workflow_filename).write_bytes(content)
-
-    # Fetch sibling files — list_directory returns filenames (not full paths)
     parent_dir_str = str(parent_dir) if str(parent_dir) != "." else "."
-    try:
-        sibling_names = list_directory(owner, repo, parent_dir_str, ref=sha)
-    except Exception:
-        return
+    repo_label = f"{owner}/{repo}"
 
-    for name in sibling_names:
-        if name == workflow_filename:
-            continue  # already fetched
-        sibling_repo_path = f"{parent_dir_str}/{name}" if parent_dir_str != "." else name
-        # Best-effort: skip names with unsafe characters rather than fail
-        # the whole fetch over a single malformed sibling entry.
+    try:
+        repo_paths = list_files_recursive(owner, repo, parent_dir_str, ref=sha)
+    except RegistryError as exc:
+        raise RegistryError(
+            f"Failed to list files under '{parent_dir_str}' in {repo_label} at {sha[:12]}: {exc}"
+        ) from exc
+
+    if workflow_path not in repo_paths:
+        raise RegistryError(
+            f"Workflow file '{workflow_path}' was not found as a regular file in "
+            f"{repo_label} at {sha[:12]} (it may be a symlink, submodule, or missing).",
+            suggestion="Check the 'path' field in the registry index points at a real file.",
+        )
+
+    for repo_path in repo_paths:
+        # Defense-in-depth: list_files_recursive is already scoped to
+        # parent_dir_str, but re-validate shape and subtree membership
+        # before trusting a path enough to write to disk.
+        safe = _safe_repo_path(repo_path)
+        if parent_dir_str != "." and not _is_within_directory(safe, parent_dir_str):
+            raise RegistryError(
+                f"Listing for {repo_label} at {sha[:12]} returned a path outside the "
+                f"workflow's containing directory: {repo_path!r}",
+                suggestion="This indicates a bug in the registry listing; please report it.",
+            )
+
         try:
-            _safe_repo_path(sibling_repo_path)
-        except RegistryError:
-            continue
-        try:
-            sibling_content = fetch_file(owner, repo, sibling_repo_path, ref=sha)
-            (target_dir / name).write_bytes(sibling_content)
-        except Exception:
-            # Best-effort for siblings — don't fail the whole fetch
-            pass
+            content = fetch_file(owner, repo, repo_path, ref=sha)
+        except RegistryError as exc:
+            raise RegistryError(
+                f"Failed to download '{repo_path}' from {repo_label} at {sha[:12]}: {exc}"
+            ) from exc
+
+        target = _resolve_within(dest_dir, safe)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
+def _is_within_directory(repo_path: PurePosixPath, directory: str) -> bool:
+    """Return True if *repo_path* lives at or under *directory* (repo-relative)."""
+    try:
+        repo_path.relative_to(PurePosixPath(directory))
+    except ValueError:
+        return False
+    return True
 
 
 def _promote_staged_files(tmp_dir: Path, sha_root: Path) -> None:
@@ -1103,18 +1364,24 @@ def _promote_staged_files(tmp_dir: Path, sha_root: Path) -> None:
     the new file, never a half-written one. Files in ``sha_root`` are
     content-addressed by the immutable SHA so overwriting an existing entry
     with the same content is safe and idempotent.
+
+    Raises:
+        RegistryError: If any staged path is unsafe or would escape
+            ``sha_root`` — this aborts promotion rather than silently
+            omitting the offending file, matching the strict completeness
+            contract of :func:`_fetch_github`.
     """
     for src in sorted(tmp_dir.rglob("*")):
         if src.is_dir():
             continue
         rel = src.relative_to(tmp_dir)
         # Defense-in-depth: re-validate that the staged path stays inside
-        # sha_root (catches any unexpected absolute component).
-        try:
-            _safe_repo_path(str(rel))
-        except RegistryError:
-            continue
-        dest = _resolve_within(sha_root, PurePosixPath(rel.as_posix()))
+        # sha_root (catches any unexpected absolute component). Unlike the
+        # pre-#530 best-effort loop, a bad path here is fatal — a staged
+        # file that can't be safely promoted must fail the whole fetch,
+        # not be dropped in silence.
+        safe = _safe_repo_path(str(rel))
+        dest = _resolve_within(sha_root, safe)
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, dest)
 
