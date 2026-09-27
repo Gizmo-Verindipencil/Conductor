@@ -119,6 +119,13 @@ _CREDENTIAL_SPECS: dict[str, _CredentialSpec] = {
     ),
     "openai": _CredentialSpec(env_vars=("OPENAI_API_KEY",)),
     "hermes": _CredentialSpec(),
+    "opencode": _CredentialSpec(
+        optional_auth_note=(
+            "opencode authenticates via its own login (e.g. `opencode auth login`) "
+            "or the model backend's key in the environment (OPENROUTER_API_KEY, etc.); "
+            "no Conductor-level credential is required"
+        ),
+    ),
 }
 
 # Update-check opt-out env var (mirrors cli/update.py so diagnostics does not
