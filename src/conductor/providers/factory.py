@@ -326,7 +326,8 @@ async def create_provider(
             raise ProviderError(
                 f"Unknown provider: {provider_type}",
                 suggestion=(
-                    "Valid providers are: copilot, openai, claude, claude-agent-sdk, hermes, aca, opencode"
+                    "Valid providers are: copilot, openai, claude, "
+                    "claude-agent-sdk, hermes, aca, opencode"
                 ),
             )
 

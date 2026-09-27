@@ -1,0 +1,1 @@
+**OpenCode provider**: adds an experimental `opencode` agent provider that drives `opencode acp` (the Agent Client Protocol server shipped with OpenCode) as an agent runtime. OpenCode owns the agentic loop, file-editing tools, and model connection; Conductor orchestrates the multi-agent workflow around it.

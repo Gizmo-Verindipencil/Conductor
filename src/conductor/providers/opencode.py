@@ -34,13 +34,12 @@ contract and AGENTS.md "Experimental Providers" for permitted carve-outs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
 import subprocess
-import time
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from conductor.exceptions import ProviderError
@@ -48,7 +47,7 @@ from conductor.providers.base import AgentOutput, AgentProvider
 from conductor.providers.capabilities import ProviderCapabilities
 
 if TYPE_CHECKING:
-    from conductor.config.schema import AgentDef
+    from conductor.config.schema import AgentDef, ToolOutputConfig
     from conductor.providers.base import EventCallback
 
 logger = logging.getLogger(__name__)
@@ -76,7 +75,7 @@ class _AcpChannel:
         self._cwd = cwd
         self._env = env
         self._timeout = timeout
-        self._proc: subprocess.Popen[str] | None = None
+        self._proc: subprocess.Popen[Any] | None = None
         self._next_id = 1
         self._handshake_done = False
         self._reader_task: asyncio.Task[None] | None = None
@@ -139,7 +138,9 @@ class _AcpChannel:
                                 fut.set_exception,
                                 ProviderError(
                                     f"opencode acp error: {msg['error']}",
-                                    suggestion="Check `opencode acp` output and the model/auth config.",
+                                    suggestion=(
+                                        "Check `opencode acp` output and the model/auth config."
+                                    ),
                                 ),
                             )
                         else:
@@ -160,7 +161,10 @@ class _AcpChannel:
                         fut.set_exception,
                         ProviderError(
                             "opencode acp process exited before responding",
-                            suggestion="Check that `opencode acp` stays alive for the whole session and that the model backend is reachable.",
+                            suggestion=(
+                    "Check that `opencode acp` stays alive for the whole session "
+                    "and that the model backend is reachable."
+                ),
                         ),
                     )
             # Unblock any drain_loop waiting on the queue.
@@ -203,11 +207,14 @@ class _AcpChannel:
         await self._write(payload)
         try:
             return await asyncio.wait_for(fut, timeout=self._timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending.pop(rid, None)
             raise ProviderError(
                 f"opencode acp request {method!r} timed out after {self._timeout}s",
-                suggestion="Increase runtime.timeout / max_session_seconds, or check the model backend.",
+                suggestion=(
+                    "Increase runtime.timeout / max_session_seconds, or check "
+                    "the model backend."
+                ),
             ) from exc
 
     async def _write(self, obj: dict[str, Any]) -> None:
@@ -245,10 +252,8 @@ class _AcpChannel:
                 self._proc.terminate()
                 await asyncio.to_thread(self._proc.wait, timeout=5)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self._proc.kill()
-                except Exception:
-                    pass
             self._proc = None
 
 
@@ -291,7 +296,7 @@ class OpenCodeProvider(AgentProvider):
         timeout: float | None = None,
         mcp_servers: dict[str, Any] | None = None,
         api_key: str | None = None,
-        tool_output: str | None = None,
+        tool_output: ToolOutputConfig | None = None,
     ) -> None:
         del provider_settings  # OpenCode authenticates via its own config/env.
         del api_key  # OpenCode reads OPENROUTER_API_KEY etc. from the environment.
@@ -372,6 +377,7 @@ class OpenCodeProvider(AgentProvider):
         custom_agents: list[dict[str, Any]] | None = None,
         extra_mcp_servers: dict[str, Any] | None = None,
         continuation_state: object | None = None,
+        suppress_mcp_servers: bool = False,
     ) -> AgentOutput:
         channel = await self._get_channel()
         await self._handshake_and_session(channel, extra_mcp_servers)
@@ -392,8 +398,6 @@ class OpenCodeProvider(AgentProvider):
 
         usage = result.get("usage", {}) or {}
         content_text = result.get("text", "")
-        stop_reason = result.get("stopReason", "end_turn")
-
         # Surface a `summary` field so YAML `output.summary` constraints pass
         # when the workflow asks for one. Use the leading non-empty lines of the
         # agent's response; OpenCode does not emit a structured summary itself.
@@ -425,10 +429,11 @@ class OpenCodeProvider(AgentProvider):
             "notes": notes,
         }
         declared = set((agent.output or {}).keys())
-        if declared:
-            content = {k: v for k, v in all_fields.items() if k in declared}
-        else:
-            content = all_fields
+        content = (
+            {k: v for k, v in all_fields.items() if k in declared}
+            if declared
+            else all_fields
+        )
 
         return AgentOutput(
             content=content,
@@ -471,8 +476,6 @@ class OpenCodeProvider(AgentProvider):
     ) -> dict[str, Any]:
         """Send session/prompt and collect streamed updates until the result."""
         # The result future resolves when session/prompt returns.
-        result_fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-
         # Monkeypatch the channel's pending handling: session/prompt's result
         # is solicited but arrives via the normal request channel, so we send
         # it through request() and separately drain session/update notifications.
@@ -515,10 +518,8 @@ class OpenCodeProvider(AgentProvider):
             result = await prompt_task
         finally:
             drain.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await drain
-            except asyncio.CancelledError:
-                pass
 
         usage_acc.update(result.get("result", {}).get("usage", {}) or {})
         return {
@@ -532,7 +533,7 @@ class OpenCodeProvider(AgentProvider):
     ) -> dict[str, Any] | None:
         try:
             return await asyncio.wait_for(channel._queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     def _dispatch_update(
@@ -574,9 +575,7 @@ class OpenCodeProvider(AgentProvider):
 
     async def close(self) -> None:
         if self._channel is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._cleanup_session(self._channel)
-            except Exception:
-                pass
             await self._channel.close()
             self._channel = None
