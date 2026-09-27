@@ -103,9 +103,7 @@ class _AcpChannel:
             text=True,
             bufsize=1,
         )
-        self._reader_task = asyncio.ensure_future(
-            asyncio.to_thread(self._read_loop_sync)
-        )
+        self._reader_task = asyncio.ensure_future(asyncio.to_thread(self._read_loop_sync))
 
     def _read_loop_sync(self) -> None:
         """Blocking stdout reader run in a worker thread (to_thread).
@@ -162,9 +160,9 @@ class _AcpChannel:
                         ProviderError(
                             "opencode acp process exited before responding",
                             suggestion=(
-                    "Check that `opencode acp` stays alive for the whole session "
-                    "and that the model backend is reachable."
-                ),
+                                "Check that `opencode acp` stays alive for the whole session "
+                                "and that the model backend is reachable."
+                            ),
                         ),
                     )
             # Unblock any drain_loop waiting on the queue.
@@ -212,8 +210,7 @@ class _AcpChannel:
             raise ProviderError(
                 f"opencode acp request {method!r} timed out after {self._timeout}s",
                 suggestion=(
-                    "Increase runtime.timeout / max_session_seconds, or check "
-                    "the model backend."
+                    "Increase runtime.timeout / max_session_seconds, or check the model backend."
                 ),
             ) from exc
 
@@ -429,11 +426,7 @@ class OpenCodeProvider(AgentProvider):
             "notes": notes,
         }
         declared = set((agent.output or {}).keys())
-        content = (
-            {k: v for k, v in all_fields.items() if k in declared}
-            if declared
-            else all_fields
-        )
+        content = {k: v for k, v in all_fields.items() if k in declared} if declared else all_fields
 
         return AgentOutput(
             content=content,
