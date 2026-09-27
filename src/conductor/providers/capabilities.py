@@ -370,6 +370,7 @@ _PROVIDER_CLASS_PATHS: Final[dict[str, str]] = {
     "claude-agent-sdk": "conductor.providers.claude_agent_sdk:ClaudeAgentSdkProvider",
     "hermes": "conductor.providers.hermes:HermesProvider",
     "aca": "conductor.providers.aca:AcaRuntimeProvider",
+    "opencode": "conductor.providers.opencode:OpenCodeProvider",
 }
 
 # Provider names that appear in the schema / factory but are not yet

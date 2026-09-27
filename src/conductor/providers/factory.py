@@ -25,6 +25,7 @@ from conductor.providers.context_tier import ContextTier
 from conductor.providers.copilot import CopilotProvider, IdleRecoveryConfig
 from conductor.providers.hermes import HERMES_SDK_AVAILABLE, HermesProvider
 from conductor.providers.openai import OPENAI_SDK_AVAILABLE, OpenAIProvider
+from conductor.providers.opencode import OpenCodeProvider
 from conductor.providers.reasoning import ReasoningEffort
 
 if TYPE_CHECKING:
@@ -313,11 +314,19 @@ async def create_provider(
                 max_session_seconds=max_session_seconds,
                 tool_output=tool_output,
             )
+        case "opencode":
+            provider = OpenCodeProvider(
+                default_model=default_model,
+                mcp_servers=mcp_servers,
+                max_agent_iterations=max_agent_iterations,
+                max_session_seconds=max_session_seconds,
+                tool_output=tool_output,
+            )
         case _:
             raise ProviderError(
                 f"Unknown provider: {provider_type}",
                 suggestion=(
-                    "Valid providers are: copilot, openai, claude, claude-agent-sdk, hermes, aca"
+                    "Valid providers are: copilot, openai, claude, claude-agent-sdk, hermes, aca, opencode"
                 ),
             )
 

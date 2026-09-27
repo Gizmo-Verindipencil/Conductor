@@ -1071,7 +1071,7 @@ def _validate_skill_entries(entries: list[str]) -> list[str]:
     return entries
 
 
-ProviderName = Literal["copilot", "openai", "claude", "claude-agent-sdk", "hermes", "aca"]
+ProviderName = Literal["copilot", "openai", "claude", "claude-agent-sdk", "hermes", "aca", "opencode"]
 """Canonical set of supported agent provider names.
 
 Used by :attr:`AgentDef.provider` and :attr:`ProviderSettings.name` so the
