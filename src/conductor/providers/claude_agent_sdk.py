@@ -467,6 +467,24 @@ def _resolve_skill_filter(
     return []
 
 
+def _resolve_claude_cli() -> Path | None:
+    """Resolve the CLI the provider will actually spawn.
+
+    Honors ``CONDUCTOR_CLAUDE_CLI_PATH`` (this fork's escape hatch) so the
+    ``claude-agent-sdk`` provider can drive a Claude-Code-compatible binary such
+    as ``maki``. When unset, falls back to the normal Claude CLI discovery.
+    """
+    override = os.environ.get("CONDUCTOR_CLAUDE_CLI_PATH")
+    if override:
+        candidate = Path(override)
+        if candidate.is_file():
+            return candidate
+        which = shutil.which(override)
+        if which:
+            return Path(which)
+    return _find_claude_cli()
+
+
 def _find_claude_cli() -> Path | None:
     """Return the resolved Claude CLI path, mirroring the SDK's lookup order.
 
@@ -1251,7 +1269,7 @@ class ClaudeAgentSdkProvider(AgentProvider):
             env_snapshot=os.environ.copy(),
             resolved_cwd=resolved_cwd,
             setting_sources=tuple(self._effective_setting_sources(agent)),
-            cli_path=_find_claude_cli(),
+            cli_path=_resolve_claude_cli(),
             auth_mode=self._auth_mode,
             configured_setting_sources=tuple(self._setting_sources),
         )
@@ -1269,6 +1287,19 @@ class ClaudeAgentSdkProvider(AgentProvider):
         if context is None:
             context = self._capture_auth_context(os.getcwd())
         mode = context.auth_mode
+
+        # Fork escape hatch: CONDUCTOR_CLAUDE_CLI_PATH lets this provider drive a
+        # Claude-Code-compatible binary (e.g. `maki`) instead of the bundled
+        # `claude`. Such binaries do not implement `claude auth status --json`, so
+        # skip the Anthropic auth probe and treat the substitute as ready - it
+        # owns its own authentication. Without this, validate_connection fails
+        # because the probe cannot parse a non-claude status payload.
+        if os.environ.get("CONDUCTOR_CLAUDE_CLI_PATH"):
+            return ClaudeAuthStatus(
+                requested_mode=mode,
+                inferred_mode="api_key",
+                ready=True,
+            )
 
         api_key = context.finalized_child_env.get("ANTHROPIC_API_KEY", "")
         api_key_present = bool(api_key.strip())
