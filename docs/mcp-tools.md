@@ -94,7 +94,7 @@ mcp_servers:
 
 The configuration fields are the same as `http`.
 
-> **Provider note:** The Claude provider only supports `stdio` servers. The `http` and `sse` types are supported by the Copilot and Claude Agent SDK providers.
+> **Provider note:** The Claude and OpenAI providers support only `stdio` servers. The `http` and `sse` types are supported by the Copilot and Claude Agent SDK providers.
 
 ## Direct MCP Steps
 
@@ -354,15 +354,15 @@ workflow:
 
 ## Provider Support
 
-| Feature | Copilot | Claude | Claude Agent SDK | Hermes |
-|---|---|---|---|---|
-| stdio servers | ✅ | ✅ | ✅ | ❌ |
-| http servers | ✅ | ❌ | ✅ | ❌ |
-| sse servers | ✅ | ❌ | ✅ | ❌ |
-| Tool filtering | ✅ | ✅ | ❌ (refused) | ❌ |
-| OAuth auto-auth | ✅ | N/A | ✅ | ❌ |
-| env var passing | ⚠️ Bug ([#163](https://github.com/github/copilot-sdk/issues/163)) | ✅ | ✅ | ❌ |
-| Tool output limits | ✅ (native SDK) | ✅ (conductor-side) | ✅ (native CLI env var) | N/A |
+| Feature | Copilot | OpenAI | Claude | Claude Agent SDK | Hermes |
+|---|---|---|---|---|---|
+| stdio servers | ✅ | ✅ | ✅ | ✅ | ❌ |
+| http servers | ✅ | ❌ | ❌ | ✅ | ❌ |
+| sse servers | ✅ | ❌ | ❌ | ✅ | ❌ |
+| Tool filtering | ✅ | ✅ | ✅ | ❌ (refused) | ❌ |
+| OAuth auto-auth | ✅ | N/A | N/A | ✅ | ❌ |
+| env var passing | ⚠️ Bug ([#163](https://github.com/github/copilot-sdk/issues/163)) | ✅ | ✅ | ✅ | ❌ |
+| Tool output limits | ✅ (native SDK) | ✅ (conductor-side) | ✅ (conductor-side) | ✅ (native CLI env var) | N/A |
 
 ### Copilot Provider
 
@@ -377,7 +377,7 @@ The Claude provider uses Conductor's built-in `MCPManager` to spawn and manage M
 - Routes tool calls through the MCP session
 - Runs an agentic loop: Claude decides when to call tools, Conductor executes them and returns results
 
-HTTP and SSE servers are not supported with the Claude provider. If configured, a warning is logged and the server is skipped.
+HTTP and SSE servers are not supported by the Claude or OpenAI providers. A remote server with either provider as an effective consumer is rejected before run rather than skipped.
 
 ### Claude Agent SDK Provider
 

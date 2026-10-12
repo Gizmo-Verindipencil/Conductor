@@ -302,7 +302,13 @@ class TestProfilesImmutability:
         # survive immutability.
         manifest = self._manifest()
         dumped = manifest.model_dump(mode="json")
-        assert dumped["profiles"] == {"start": {"profile": "default", "backend": "local"}}
+        assert dumped["profiles"] == {
+            "start": {
+                "profile": "default",
+                "backend": "local",
+                "inherit_control_environment": True,
+            }
+        }
         json.dumps(dumped, sort_keys=True)
 
     def test_profiles_copy_is_read_only(self) -> None:
@@ -517,6 +523,7 @@ def test_manifest_has_no_run_varying_fields() -> None:
         "workflow",
         "environment",
         "profiles",
+        "secrets",
         "conductor_version",
         "audit",
     }

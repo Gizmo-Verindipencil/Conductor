@@ -2,7 +2,7 @@
 
 ``compile_run_manifest`` resolves every executable step of the *root* workflow
 configuration to a concrete runner backend through an execution environment
-document and pins the result in a :class:`ResolvedRunManifest`. The manifest is
+document and records the result in a :class:`ResolvedRunManifest`. The manifest is
 **run-invariant**: it deliberately contains no run id, no timestamps, no
 inputs, no CLI overrides, and no absolute paths, so two compilations of the
 same inputs produce byte-identical ``model_dump(mode="json")`` output and the
@@ -34,29 +34,47 @@ claims resolution authority over configuration it has not read.
 
 **Audit posture.** Every manifest carries an :class:`AuditInfo` classifying
 itself as ``non-hermetic-compatibility``: resolved profiles and backends may
-depend on machine-local environment documents, so the manifest pins what was
+depend on machine-local environment documents, so the manifest records what was
 resolved (names, digests, content hashes) rather than pretending the
 resolution was hermetic.
+
+**Versioning.** Version 1 is additive: new fields may be added without a
+version bump, and consumers are expected to ignore unknown keys. Defaults on
+new model fields preserve reads of manifests written by earlier v1 producers.
+The optional per-profile ``execution`` field follows this rule: consumers must
+ignore it when unknown or ``None``. The ``script_steps`` identity list is the
+exception that proves the rule: it is an in-memory aid for script-step
+discrimination (see :func:`script_step_backends`), excluded from serialization
+entirely so dumps stay byte-identical to pre-recording producers.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
-from conductor.config.environment import ResolvedEnvironment
+from conductor.config.environment import ProfileDefinition, ResolvedEnvironment
 from conductor.config.schema import (
     ExecutableStepBase,
     ScriptStepDef,
+    StepSecretRef,
     WorkflowConfig,
+    WorkflowDefaults,
 )
 from conductor.exceptions import ConfigurationError
 from conductor.execution import LocalRunnerBackend, RunnerBackend
+from conductor.execution.docker import DockerRunnerBackend
+from conductor.providers.resolution import (
+    effective_mcp_consumer_providers,
+    format_claude_agent_sdk_remote_env_error,
+    format_remote_mcp_stdio_only_error,
+)
 
 # Capability-introspection registry: backend name -> a backend instance asked
 # only for its static ``capabilities()`` declaration. The instances are
@@ -66,6 +84,10 @@ from conductor.execution import LocalRunnerBackend, RunnerBackend
 # has no instance state at all); any future backend registered here must too.
 BACKEND_CAPABILITY_PROVIDERS: dict[str, RunnerBackend] = {
     "local": LocalRunnerBackend(),
+    # DockerRunnerBackend's constructor is I/O-free (it only stores the binary
+    # name and an environment snapshot), so a module-level instance is safe to
+    # keep here for static capability introspection at compile time.
+    "docker": DockerRunnerBackend(),
 }
 
 
@@ -93,6 +115,31 @@ class EnvironmentIdentity(BaseModel):
     digest: str
 
 
+class ManifestExecutionSpec(BaseModel):
+    """Normalized requested container configuration recorded for audit.
+
+    An image tag records the requested reference but does not identify the
+    bytes selected by the daemon. An image digest identifies those bytes. All
+    fields remain present in serialized output, including explicit nulls, so
+    an audit consumer sees a stable key set for every recorded execution.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    image: str
+    platform: str | None = None
+    network: str | None = None
+    user: str | None = None
+    init: bool = False
+    read_only: bool = False
+    cap_drop_all: bool = False
+    no_new_privileges: bool = False
+    tmpfs: bool | str = False
+    cpu: float | None = None
+    memory: str | None = None
+    pids: int | None = None
+
+
 class ResolvedStepProfile(BaseModel):
     """One executable step's resolved execution profile and backend."""
 
@@ -100,13 +147,31 @@ class ResolvedStepProfile(BaseModel):
 
     profile: str
     backend: str
+    inherit_control_environment: bool = True
+    execution: ManifestExecutionSpec | None = None
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        dump = super().model_dump(*args, **kwargs)
+        if dump.get("execution") is None:
+            dump.pop("execution", None)
+        return dump
+
+
+class ResolvedSecretUse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    consumer: str
+    ref: str
+    scope: Literal["script", "mcp"]
+    delivery_kind: Literal["env", "header"]
+    delivery_name: str
 
 
 class AuditInfo(BaseModel):
     """Self-classification of the manifest's hermetic posture.
 
     ``hermetic`` is a literal ``False``: resolution depends on machine-local
-    environment documents, so the manifest pins resolved names and digests
+    environment documents, so the manifest records resolved names and digests
     instead of claiming hermetic reproducibility. ``classification`` is the
     stable label downstream tooling keys on.
     """
@@ -131,8 +196,18 @@ class ResolvedRunManifest(BaseModel):
     read-only mapping: the manifest is the run's audit record, so nothing
     with a handle to it may mutate execution resolution after compilation.
     Serialization still yields a plain ``dict`` (see the field serializer)."""
+    secrets: tuple[ResolvedSecretUse, ...] = ()
     conductor_version: str
     audit: AuditInfo
+    script_steps: tuple[str, ...] = Field(default=(), exclude=True)
+    """Identities (``profiles`` keys) of the steps the compiler resolved as
+    :class:`ScriptStepDef`, captured during compilation so
+    :func:`script_step_backends` can restrict mixed-backend detection to
+    script steps. An in-memory aid, never part of the audit dump:
+    ``exclude=True`` keeps serialized manifests byte-identical to
+    pre-recording v1 producers, at the cost that a manifest revalidated from
+    its own dump carries no identities (the helper's documented fallback
+    covers that case)."""
 
     @field_validator("profiles", mode="after")
     @classmethod
@@ -159,6 +234,13 @@ class ResolvedRunManifest(BaseModel):
         the manifest's byte-deterministic dump contract.
         """
         return dict(value)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        dump = super().model_dump(*args, **kwargs)
+        for profile in dump.get("profiles", {}).values():
+            if isinstance(profile, dict) and profile.get("execution") is None:
+                profile.pop("execution", None)
+        return dump
 
 
 def executable_step_identity(name: str, *, for_each_group: str | None = None) -> str:
@@ -246,10 +328,10 @@ def _iter_executable_steps(config: WorkflowConfig) -> list[tuple[str, Executable
     return steps
 
 
-def _resolve_profile_name(
-    key: str,
+def effective_profile_name(
     step: ExecutableStepBase,
-    config: WorkflowConfig,
+    key: str,
+    workflow_defaults: WorkflowDefaults,
     environment: ResolvedEnvironment,
 ) -> str:
     """Resolve the profile name for one step through the precedence chain.
@@ -257,7 +339,7 @@ def _resolve_profile_name(
     Chain, first hit wins:
 
     1. ``step.execution.profile``
-    2. ``config.workflow.defaults.execution.profile``
+    2. ``workflow_defaults.execution.profile``
     3. ``environment.document.default``
 
     A complete miss is a configuration error naming the step and the full
@@ -267,7 +349,7 @@ def _resolve_profile_name(
     if step_profile is not None:
         return step_profile
 
-    defaults = config.workflow.defaults.execution
+    defaults = workflow_defaults.execution
     workflow_profile = defaults.profile if defaults is not None else None
     if workflow_profile is not None:
         return workflow_profile
@@ -285,6 +367,61 @@ def _resolve_profile_name(
         "'workflow.defaults.execution.profile', or give the environment "
         "document a 'default' profile.",
     )
+
+
+def resolve_execution_spec(definition: ProfileDefinition) -> ManifestExecutionSpec | None:
+    """Copy a profile's normalized requested container configuration.
+
+    Environment schema validation has already normalized every value. This
+    function deliberately performs no daemon lookup or further interpretation.
+    """
+    if definition.backend != "docker":
+        return None
+    docker = definition.docker
+    assert docker is not None
+    resources = docker.resources
+    return ManifestExecutionSpec(
+        image=docker.image,
+        platform=docker.platform,
+        network=docker.network,
+        user=docker.user,
+        init=docker.init,
+        read_only=docker.read_only,
+        cap_drop_all=docker.cap_drop_all,
+        no_new_privileges=docker.no_new_privileges,
+        tmpfs=docker.tmpfs,
+        cpu=resources.cpu,
+        memory=resources.memory,
+        pids=resources.pids,
+    )
+
+
+def script_step_backends(manifest: ResolvedRunManifest) -> frozenset[str]:
+    """Return the distinct backends the run's script steps resolve to.
+
+    Only profiles whose step identity the compiler recorded in
+    ``ResolvedRunManifest.script_steps`` count. Agent, workflow, and MCP steps
+    are compile-time pinned to ``local`` (a non-local backend there is a
+    reserved error), so reading backends off *every* profile would pollute
+    mixed-backend detection with a backend no script step uses — the dominant
+    shape, an agent-plus-Docker-script workflow, would always look "mixed".
+
+    Legacy fallback: an empty ``script_steps`` means either a genuinely
+    script-free compilation or a manifest without recorded identities — a v1
+    payload written by an earlier producer, or any manifest revalidated from
+    its serialized dump (``script_steps`` is never serialized). The two are
+    indistinguishable, and the second cannot afford a wrong "no": this
+    helper's only consumers are the mixed-backend run warning and the bundle
+    docker-presence gate, where silently dropping a diagnostic the run used
+    to emit is worse than the old over-inclusive answer. An empty set
+    therefore answers as the pre-recording implementation did — the backends
+    of ALL profiles. That fallback is exact for the script-free case anyway:
+    non-script steps pin to ``local``, so no Docker backend can appear in a
+    manifest that compiled no script steps.
+    """
+    if manifest.script_steps:
+        return frozenset(manifest.profiles[key].backend for key in manifest.script_steps)
+    return frozenset(profile.backend for profile in manifest.profiles.values())
 
 
 def _require_script_backend_capability(key: str, backend_name: str) -> None:
@@ -305,6 +442,196 @@ def _require_script_backend_capability(key: str, backend_name: str) -> None:
         )
 
 
+def _require_known_secret_ref(
+    secret: StepSecretRef,
+    *,
+    consumer: str,
+    environment: ResolvedEnvironment,
+) -> None:
+    bindings = environment.document.secrets or {}
+    if secret.ref in bindings:
+        return
+    available = ", ".join(sorted(bindings)) or "none"
+    raise ConfigurationError(
+        f"Secret reference '{secret.ref}' used by '{consumer}' is not defined "
+        f"in environment '{environment.name}' (available secrets: {available}).",
+        suggestion="Declare the secret in the environment document, or use one "
+        "of the available secret names.",
+    )
+
+
+def _resolved_secret_use(
+    consumer: str,
+    secret: StepSecretRef,
+    scope: Literal["script", "mcp"],
+) -> ResolvedSecretUse:
+    if secret.delivery.env is not None:
+        return ResolvedSecretUse(
+            consumer=consumer,
+            ref=secret.ref,
+            scope=scope,
+            delivery_kind="env",
+            delivery_name=secret.delivery.env,
+        )
+    assert secret.delivery.header is not None
+    return ResolvedSecretUse(
+        consumer=consumer,
+        ref=secret.ref,
+        scope=scope,
+        delivery_kind="header",
+        delivery_name=secret.delivery.header,
+    )
+
+
+def _check_delivery_collisions(
+    consumer: str,
+    *,
+    literal_env: Iterable[str],
+    literal_headers: Iterable[str],
+    secrets: Iterable[StepSecretRef],
+) -> None:
+    """Reject delivery-name collisions within one consumer at compile time.
+
+    Mirrors ``config.validator._delivery_collision_errors`` with identical
+    wording, so the same mistake reads the same whether it surfaces at
+    ``conductor validate`` or at manifest compilation. Running here matters
+    because ``conductor run`` never invokes the semantic validator: without
+    it, two secret references collapsing onto one delivery name silently
+    let the last credential win in the delivery dicts, and a case-only
+    literal collision goes unnoticed on Windows, where environment variable
+    names are case-insensitive.
+    """
+    env_names = {name.casefold() if sys.platform == "win32" else name for name in literal_env}
+    header_names = {name.casefold() for name in literal_headers}
+    for secret in secrets:
+        delivery = secret.delivery
+        if delivery.env is not None:
+            env_key = delivery.env.casefold() if sys.platform == "win32" else delivery.env
+            if env_key in env_names:
+                raise ConfigurationError(
+                    f"Secret delivery name '{delivery.env}' collides within consumer "
+                    f"'{consumer}' (environment variable names must be unique)."
+                )
+            env_names.add(env_key)
+        else:
+            assert delivery.header is not None
+            header_key = delivery.header.casefold()
+            if header_key in header_names:
+                raise ConfigurationError(
+                    f"Secret delivery name '{delivery.header}' collides within consumer "
+                    f"'{consumer}' (HTTP header names are case-insensitive and must be unique)."
+                )
+            header_names.add(header_key)
+
+
+def _compile_step_secret_uses(
+    key: str,
+    step: ExecutableStepBase,
+    environment: ResolvedEnvironment,
+) -> list[ResolvedSecretUse]:
+    secrets = step.execution.secrets if step.execution is not None else []
+    if not secrets:
+        return []
+    if not isinstance(step, ScriptStepDef) or any(secret.scope == "agent" for secret in secrets):
+        raise ConfigurationError(
+            f"Step '{key}' requests secret delivery, but agent-scope delivery is reserved "
+            "until agent execution realms (step 7).",
+            suggestion="Remove the secret reference until agent execution realms are available.",
+        )
+
+    uses: list[ResolvedSecretUse] = []
+    for secret in secrets:
+        if secret.delivery.header is not None:
+            raise ConfigurationError(
+                f"Script step '{key}' requests header delivery for secret '{secret.ref}', "
+                "but header delivery is MCP-only.",
+                suggestion="Use delivery.env for script steps.",
+            )
+        if secret.scope != "script":
+            raise ConfigurationError(
+                f"Script step '{key}' cannot consume secret '{secret.ref}' with scope "
+                f"'{secret.scope}'; this position requires scope 'script'.",
+                suggestion="Set the secret scope to 'script' or move it to an MCP server.",
+            )
+        _require_known_secret_ref(secret, consumer=key, environment=environment)
+        uses.append(_resolved_secret_use(key, secret, "script"))
+    # Non-script steps and agent-scope refs raised above, so the literal
+    # ``env`` keys to check against are the script step's own.
+    assert isinstance(step, ScriptStepDef)
+    _check_delivery_collisions(
+        key,
+        literal_env=step.env,
+        literal_headers=(),
+        secrets=secrets,
+    )
+    return uses
+
+
+def _compile_mcp_secret_uses(
+    config: WorkflowConfig,
+    environment: ResolvedEnvironment,
+) -> list[ResolvedSecretUse]:
+    uses: list[ResolvedSecretUse] = []
+    consumers = effective_mcp_consumer_providers(config)
+    for server_name in sorted(config.workflow.runtime.mcp_servers):
+        server = config.workflow.runtime.mcp_servers[server_name]
+        consumer = f"mcp:{server_name}"
+        if server.type in ("http", "sse"):
+            stdio_only = consumers & {"claude", "openai"}
+            if stdio_only:
+                raise ConfigurationError(
+                    format_remote_mcp_stdio_only_error(
+                        server_name,
+                        server.type,
+                        stdio_only,
+                    ),
+                    suggestion="Use a stdio MCP server or override every consuming agent to a "
+                    "provider that supports remote MCP transports.",
+                )
+        for secret in server.secrets:
+            if secret.scope == "agent":
+                raise ConfigurationError(
+                    f"MCP server '{server_name}' requests agent-scope delivery, but agent-scope "
+                    "delivery is reserved until agent execution realms (step 7).",
+                    suggestion="Use scope 'mcp' for MCP server secret delivery.",
+                )
+            if secret.scope != "mcp":
+                raise ConfigurationError(
+                    f"MCP server '{server_name}' cannot consume secret '{secret.ref}' with scope "
+                    f"'{secret.scope}'; this position requires scope 'mcp'.",
+                    suggestion="Set the secret scope to 'mcp' or move it to a script step.",
+                )
+            if secret.delivery.header is not None and server.type == "stdio":
+                raise ConfigurationError(
+                    f"MCP server '{server_name}' uses transport 'stdio', which cannot deliver "
+                    f"secret '{secret.ref}' through an HTTP header.",
+                    suggestion="Use delivery.env for stdio, or an HTTP/SSE transport for headers.",
+                )
+            if (
+                secret.delivery.env is not None
+                and server.type in ("http", "sse")
+                and "claude-agent-sdk" in consumers
+            ):
+                raise ConfigurationError(
+                    format_claude_agent_sdk_remote_env_error(
+                        server_name,
+                        server.type,
+                        secret.ref,
+                    ),
+                    suggestion="Use delivery.header (e.g. header: Authorization) for remote "
+                    "servers on the claude-agent-sdk provider.",
+                )
+            _require_known_secret_ref(secret, consumer=consumer, environment=environment)
+            uses.append(_resolved_secret_use(consumer, secret, "mcp"))
+        _check_delivery_collisions(
+            consumer,
+            literal_env=server.env,
+            literal_headers=server.headers,
+            secrets=server.secrets,
+        )
+    return uses
+
+
 def compile_run_manifest(
     config: WorkflowConfig,
     *,
@@ -315,7 +642,7 @@ def compile_run_manifest(
 
     Pure function: the same inputs always produce the same manifest. Each
     executable step of the root config is resolved through the precedence
-    chain (see :func:`_resolve_profile_name`) to a profile defined in
+    chain (see :func:`effective_profile_name`) to a profile defined in
     ``environment.document.profiles``; script steps are additionally checked
     against the backend's batch capability (see
     :func:`_require_script_backend_capability`).
@@ -337,8 +664,15 @@ def compile_run_manifest(
             resolves to a backend without batch capability.
     """
     profiles: dict[str, ResolvedStepProfile] = {}
+    script_keys: list[str] = []
+    secrets: list[ResolvedSecretUse] = []
     for key, step in _iter_executable_steps(config):
-        profile_name = _resolve_profile_name(key, step, config, environment)
+        profile_name = effective_profile_name(
+            step,
+            key,
+            config.workflow.defaults,
+            environment,
+        )
         definition = environment.document.profiles.get(profile_name)
         if definition is None:
             available = ", ".join(sorted(environment.document.profiles))
@@ -352,7 +686,32 @@ def compile_run_manifest(
         backend_name = definition.backend
         if isinstance(step, ScriptStepDef):
             _require_script_backend_capability(key, backend_name)
-        profiles[key] = ResolvedStepProfile(profile=profile_name, backend=backend_name)
+            execution = resolve_execution_spec(definition)
+        else:
+            if backend_name != "local":
+                raise ConfigurationError(
+                    f"Step '{key}' resolves to backend '{backend_name}', but backend "
+                    f"'{backend_name}' is available for script steps only; agent execution "
+                    "realms arrive in step 7.",
+                    suggestion="Move the step to a local profile or remove execution.profile.",
+                )
+            execution = None
+        inherit_control_environment = (
+            definition.inherit_control_environment
+            if definition.inherit_control_environment is not None
+            else backend_name == "local"
+        )
+        profiles[key] = ResolvedStepProfile(
+            profile=profile_name,
+            backend=backend_name,
+            inherit_control_environment=inherit_control_environment,
+            execution=execution,
+        )
+        if isinstance(step, ScriptStepDef):
+            script_keys.append(key)
+        secrets.extend(_compile_step_secret_uses(key, step, environment))
+
+    secrets.extend(_compile_mcp_secret_uses(config, environment))
 
     digest: str | None = None
     if workflow_path is not None:
@@ -367,6 +726,8 @@ def compile_run_manifest(
             digest=environment.digest,
         ),
         profiles=profiles,
+        secrets=tuple(secrets),
         conductor_version=_conductor_version(),
         audit=AuditInfo(hermetic=False, classification="non-hermetic-compatibility"),
+        script_steps=tuple(script_keys),
     )

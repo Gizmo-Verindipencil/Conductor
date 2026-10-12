@@ -7,11 +7,12 @@ provider instances with lazy instantiation and caching.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from conductor.config.schema import ProviderName
 from conductor.providers.base import AgentProvider
 from conductor.providers.factory import create_provider
+from conductor.providers.resolution import provider_type_for_agent
 
 if TYPE_CHECKING:
     from conductor.config.schema import AgentDef, ProviderSettings, WorkflowConfig
@@ -84,9 +85,7 @@ class ProviderRegistry:
         Returns:
             The provider type to use for this agent.
         """
-        if agent.provider is not None:
-            return agent.provider
-        return self._default_provider_type
+        return cast(ProviderType, provider_type_for_agent(agent, self._default_provider_type))
 
     async def get_provider(self, agent: AgentDef) -> AgentProvider:
         """Get the provider for an agent, creating it if necessary.

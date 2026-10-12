@@ -1,0 +1,58 @@
+# Claude Subscription Mode Example Workflow
+#
+# Prerequisites:
+#   - Claude Code CLI installed and configured
+#   - User logged in with "claude auth login"
+#   - Running with explicit subscription auth_mode (not auto)
+#
+# This example demonstrates a basic workflow using Claude's subscription billing mode.
+# It uses the bundled Claude CLI to authenticate. The label "API-equivalent estimate" (not a
+# real invoice or quota measurement) appears in the usage information only for priced runs.
+#
+# See docs/providers/claude-subscription.md for the operator runbook.
+#
+# Run (one inference-capable workflow attempt on your subscription; the agent session may make
+# several SDK turns and internal model requests, which are not counted):
+#   conductor run examples/claude-agent-sdk-subscription.yaml --input question="What is Conductor?"
+
+workflow:
+  name: subscription-example
+  description: Simple Q&A workflow using Claude subscription billing
+  version: "1.0.0"
+  entry_point: answerer
+
+  runtime:
+    provider:
+      name: claude-agent-sdk
+      auth_mode: subscription
+      native_tools: none
+      setting_sources: []
+    default_model: claude-haiku-4-5
+    max_session_seconds: 60
+
+  input:
+    question:
+      type: string
+      required: true
+      description: The question to answer
+      default: "What is Conductor?"
+
+agents:
+  - name: answerer
+    description: Answers questions using subscription billing
+    prompt: |
+      You are a helpful assistant. Please answer the following question clearly:
+
+      {{ workflow.input.question }}
+
+      Be concise and direct.
+    tools: []
+    output:
+      answer:
+        type: string
+        description: The answer to the question
+    routes:
+      - to: $end
+
+output:
+  answer: "{{ answerer.output.answer }}"

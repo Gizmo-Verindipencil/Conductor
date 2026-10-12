@@ -717,6 +717,10 @@ workflow:
 
 **budget_usd** and **budget_mode**:
 - Tracks cumulative cost and acts when the budget is exceeded
+- `budget_usd` limits the estimated cost computed from token counts at API
+  rates. For subscription and mixed runs that estimate is a deterministic proxy
+  for token consumption; it is not a limit on, or a measurement of,
+  subscription quota, plan usage, or money
 - `audit` mode (default): emits a `budget_exceeded` event and logs a warning,
   but the workflow continues — use this to discover cost profiles
 - `enforce` mode: emits a `budget_exceeded` event, saves a checkpoint,
@@ -941,14 +945,121 @@ default: shell
 profiles:
   shell:
     backend: local
+    inherit_control_environment: true
   isolated:
     backend: local
+    inherit_control_environment: false
+  containerized:
+    backend: docker
+    docker:
+      image: alpine:3.20
+
+# Optional: secret bindings mapping logical names to credential sources
+secrets:
+  api_token:
+    source:
+      env: PROD_API_TOKEN
+    allow: [script, mcp]
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `default` | string (optional) | Profile assigned to executable steps without an explicit `execution.profile`. When set, it must match one of the keys in `profiles`. |
-| `profiles` | mapping (required) | Non-empty dictionary of profile names. Each profile specifies a `backend` name from available runners (such as `local`). |
+| `profiles` | mapping (required) | Non-empty dictionary of profile names. Each profile specifies a `backend` name from available runners (such as `local`) and an optional `inherit_control_environment` flag. |
+| `secrets` | mapping (optional) | Dictionary of logical secret names mapped to source definitions and consumer access rules. |
+
+#### Profile Settings
+
+Each profile under `profiles` supports:
+
+- `backend` (required): The runner backend implementing this profile (`local` or `docker`).
+- `inherit_control_environment` (optional, boolean): Controls whether subprocesses executed under this profile inherit the host process environment. When omitted (`None`), the backend decides the default. The local subprocess runner defaults to effective `true`, while the `docker` backend defaults to effective `false`. Setting `inherit_control_environment: true` on a Docker profile triggers a validation warning because it copies the full host environment into container metadata visible to daemon administrators.
+- `docker` (optional, object): Configuration options required when `backend: docker` is selected. Rejected when `backend: local`.
+
+#### Docker Profile Configuration (`docker`)
+
+When a profile uses `backend: docker`, the `docker` block configures the container execution parameters:
+
+```yaml
+profiles:
+  # Minimal frictionless configuration
+  build:
+    backend: docker
+    docker:
+      image: node:20
+
+  # Fully hardened configuration
+  secure_runner:
+    backend: docker
+    docker:
+      image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      platform: linux/amd64
+      network: none
+      user: "65532:65532"
+      init: true
+      read_only: true
+      cap_drop_all: true
+      no_new_privileges: true
+      tmpfs: "512m"
+      resources:
+        cpu: 2.0
+        memory: "1g"
+        pids: 256
+```
+
+| Field | Type | Default | Validation Bounds and Description |
+|-------|------|---------|-----------------------------------|
+| `image` | string (required) | (none) | Container image reference (tag or digest). Must be a non-empty string without whitespace. |
+| `platform` | string (optional) | `None` | Target platform: `linux/amd64` or `linux/arm64`. When omitted, the platform is auto-resolved by Docker. |
+| `network` | string (optional) | `None` | Container network mode: `none`, `bridge`, or `host`. `None` keeps the daemon default. `host` triggers a validation warning. |
+| `user` | string (optional) | `None` | Container user in Docker syntax `<name\|uid>[:<group\|gid>]`. When omitted, uses the image `USER`. |
+| `init` | boolean (optional) | `false` | When `true`, enables Docker's init process (`docker --init`) to reap zombie subprocesses. |
+| `read_only` | boolean (optional) | `false` | When `true`, mounts the container root filesystem as read-only. Setting `read_only: true` without `tmpfs` triggers a validation warning. |
+| `cap_drop_all` | boolean (optional) | `false` | When `true`, drops all Linux capabilities (`--cap-drop=ALL`). |
+| `no_new_privileges` | boolean (optional) | `false` | When `true`, disables privilege escalation (`--security-opt=no-new-privileges`). |
+| `tmpfs` | boolean or string (optional) | `false` | Tmpfs mount at `/tmp`. `false` disables tmpfs, `true` mounts standard tmpfs, or a size string like `"512m"` or `"1g"`. |
+| `resources` | object (optional) | `{}` | Resource ceilings for the container (see below). |
+
+##### Docker Resources (`resources`)
+
+The `resources` mapping configures resource constraints on the container:
+
+| Field | Type | Default | Bounds and Description |
+|-------|------|---------|------------------------|
+| `cpu` | float (optional) | `None` | CPU limit in cores. Bounded between `0.1` and `64.0` cores (e.g. `0.5`, `2.0`). |
+| `memory` | string (optional) | `None` | Memory limit formatted as `<number>[m\|g]`. Bounded between `16m` and `64g` (e.g. `"512m"`, `"2g"`). |
+| `pids` | integer (optional) | `None` | Process limit. Bounded between `16` and `65536`. |
+
+When omitted, resource constraints are not set on the container and it shares host resources unconstrained. On shared CI environments, setting resource bounds is recommended.
+
+#### Secret Bindings
+
+The `secrets` section maps logical secret names to concrete credential sources:
+
+```yaml
+secrets:
+  api_token:
+    source:
+      env: PRODUCTION_API_KEY
+    allow: [script, mcp]
+
+  database_url:
+    source:
+      env: DB_CONNECTION_STRING
+    # allow omitted: permitted for all consumer classes
+
+  revoked_key:
+    source:
+      env: STALE_KEY
+    allow: [] # fail-closed: permitted for no consumer classes
+```
+
+- **Name**: The dictionary key is the logical secret identifier matching `[A-Za-z0-9_.-]+`.
+- **Source (`source`)**: Defines where the secret value is read from. In v1, `source.env` is the supported source kind, pointing to a host environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+- **Access Policy (`allow`)**: Restricts which workflow consumer classes can resolve the secret:
+  - `None` (omitted): Allowed for all consumer classes (`script`, `mcp`).
+  - `[]` (empty list): Explicitly fail-closed. Denied for all consumers.
+  - `["script"]` / `["mcp"]`: Restricted to the specified consumer classes. Validation fails if an unlisted consumer attempts to reference the secret.
 
 ### Plain YAML Loading (No Variable Expansion)
 
@@ -1041,6 +1152,34 @@ is the explicit manual entry point and always works regardless of this
 setting — pass `--keep-last` to override the configured value for a single
 invocation, or `--dry-run` to preview what would be deleted without
 actually deleting anything.
+
+## Bundle Cache Directory (`~/.conductor/cache/bundles/`)
+
+When building content-addressed run bundles (`conductor bundle build`), Conductor stores the resulting package in a local cache directory:
+
+```
+~/.conductor/cache/bundles/
+```
+
+If `CONDUCTOR_HOME` is set, the cache path defaults to `$CONDUCTOR_HOME/cache/bundles/` instead.
+
+### Structure
+
+Each bundle is stored under a filesystem-safe encoding of its full content
+digest. The manifest keeps `sha256:<hex>`, while the directory name replaces
+the colon with a hyphen for Windows compatibility:
+
+```
+$CONDUCTOR_HOME/cache/bundles/
+  sha256-<hex>/
+    bundle.json       # Manifest sentinel certifying the staged tree
+    bundle.tar.gz     # Deterministic gzip archive of the bundle
+    tree/             # Staged file hierarchy under normalized POSIX paths
+```
+
+### Retention and Lifecycle
+
+In v1, bundle cache storage grows without automated garbage collection. Stored bundles remain in the cache until removed manually or cleared by CI teardown steps. Rebuilding a workflow whose file closure has not changed reuses the existing bundle directory immediately without re-staging files.
 
 ## See Also
 

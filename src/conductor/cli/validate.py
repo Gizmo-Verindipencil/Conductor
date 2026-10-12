@@ -7,6 +7,7 @@ without executing them, displaying detailed error information.
 from __future__ import annotations
 
 import os
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,7 +23,7 @@ from conductor.telemetry.guards import OTEL_SDK_AVAILABLE
 
 if TYPE_CHECKING:
     from conductor.config.environment import ResolvedEnvironment
-    from conductor.config.schema import WorkflowConfig
+    from conductor.config.schema import StepSecretRef, WorkflowConfig
     from conductor.engine.run_manifest import ResolvedRunManifest
 
 
@@ -89,16 +90,17 @@ def validate_workflow(
 
     # Semantic validation: cross-field references, template refs, etc.
     try:
-        from conductor.config.validator import validate_workflow_config
+        from conductor.config.validator import _has_secret_references, validate_workflow_config
 
         environment_context = None
-        if environment is not None:
+        if environment is not None and resolved_environment is not None:
             environment_context = {
                 "refs_found": False,
-                "environments": None,
+                "environments": {resolved_environment.name: resolved_environment},
                 "explicit": True,
                 "root_workflow_dir": workflow_path.parent,
                 "warned_no_environments": False,
+                "warned_no_secret_environments": False,
             }
         warnings = validate_workflow_config(
             config,
@@ -116,6 +118,15 @@ def validate_workflow(
     _report_plugins(config, workflow_path, output_console)
     if manifest is not None and resolved_environment is not None:
         _report_execution_resolution(manifest, resolved_environment, output_console)
+        if not _report_bundle_closure(
+            config,
+            workflow_path,
+            resolved_environment,
+            output_console,
+        ):
+            return False, None
+        if _has_secret_references(config):
+            _report_secret_bindings(config, resolved_environment, output_console)
     _report_mcp(config, output_console)
     _report_telemetry_sdk(output_console)
 
@@ -149,6 +160,215 @@ def _report_execution_resolution(
         profiles.add_row(step, resolution.profile, resolution.backend)
     console.print(profiles)
     console.print(styled("  [dim]Audit: {}[/dim]", manifest.audit.classification))
+
+    docker_profiles = {
+        name: profile
+        for name, profile in environment.document.profiles.items()
+        if profile.backend == "docker"
+    }
+    if not docker_profiles:
+        return
+
+    console.print(
+        Text.from_markup(
+            "  [dim]Docker runs require a complete bundle closure; "
+            "conductor bundle build primes the cache.[/dim]"
+        )
+    )
+    for name, profile in sorted(docker_profiles.items()):
+        docker = profile.docker
+        assert docker is not None
+        resources = docker.resources
+        console.print(styled("\n[bold]Docker Profile: {}[/bold]", name))
+        profile_details = Table(show_header=False, box=None, padding=(0, 2))
+        profile_details.add_column("Key", style="dim")
+        profile_details.add_column("Value")
+        profile_details.add_row("Image", docker.image)
+        profile_details.add_row("Platform", docker.platform or "Docker default")
+        profile_details.add_row("Network", docker.network or "Docker default")
+        profile_details.add_row("User", docker.user or "Docker default")
+        profile_details.add_row("Init", "true" if docker.init else "false")
+        profile_details.add_row("Read-only", "true" if docker.read_only else "false")
+        profile_details.add_row("Cap-drop-all", "true" if docker.cap_drop_all else "false")
+        profile_details.add_row(
+            "No-new-privileges", "true" if docker.no_new_privileges else "false"
+        )
+        profile_details.add_row(
+            "Tmpfs",
+            docker.tmpfs if isinstance(docker.tmpfs, str) else str(docker.tmpfs).lower(),
+        )
+        profile_details.add_row("CPU", str(resources.cpu) if resources.cpu is not None else "—")
+        profile_details.add_row("Memory", resources.memory or "—")
+        profile_details.add_row("PIDs", str(resources.pids) if resources.pids is not None else "—")
+        console.print(profile_details)
+        if "@sha256:" not in docker.image:
+            console.print(
+                Text.from_markup(
+                    "  [dim]For reproducible CI, pin this image by digest "
+                    "(for example, image@sha256:...).[/dim]"
+                )
+            )
+
+
+def _report_bundle_closure(
+    _config: WorkflowConfig,
+    workflow_path: Path,
+    environment: ResolvedEnvironment,
+    console: MarkupFreeConsole,
+) -> bool:
+    """Collect and report the workflow's offline bundle closure.
+
+    Args:
+        _config: The validated workflow configuration. The collector reloads it
+            with include provenance, so this argument documents that the report
+            belongs to the already validated configuration.
+        workflow_path: Path to the root workflow file.
+        environment: Resolved execution environment linked to the closure.
+        console: Rich console for output.
+
+    Returns:
+        ``True`` when collection completed or was deferred only by uncached
+        plugin sources; ``False`` for a validation-blocking bundle error.
+    """
+    from conductor.bundle.collector import collect_bundle
+    from conductor.bundle.errors import BundleError
+
+    warnings: list[str] = []
+    try:
+        collected = collect_bundle(
+            workflow_path,
+            environment=environment,
+            allow_network=False,
+            on_warning=warnings.append,
+        )
+    except BundleError as error:
+        display_validation_error(error, workflow_path, console)
+        return False
+
+    console.print(Text.from_markup("\n[bold]Bundle Closure[/bold]"))
+    descriptor = collected.descriptor
+    if descriptor.incomplete:
+        console.print(styled("  [yellow]Status:[/yellow] incomplete"))
+        for dependency in descriptor.incomplete:
+            console.print(styled("  [yellow]⚠[/yellow] Missing from cache: {}", dependency))
+        for warning in warnings:
+            console.print(styled("  [yellow]⚠[/yellow] {}", warning))
+        return True
+
+    console.print(styled("  [green]Status:[/green] complete"))
+    console.print(styled("  [dim]Bundle digest:[/dim] {}", descriptor.bundle_digest))
+
+    counts = Counter(entry.origin_kind for entry in collected.entries)
+    origins = Table(show_header=True, header_style="bold", box=None)
+    origins.add_column("Origin")
+    origins.add_column("Entries", justify="right")
+    for origin_kind, count in sorted(counts.items()):
+        origins.add_row(origin_kind, str(count))
+    console.print(origins)
+
+    total_size = sum(entry.size for entry in collected.entries)
+    roots = sorted({_bundle_entry_root(entry.logical_path) for entry in collected.entries})
+    console.print(styled("  [dim]Total size:[/dim] {} bytes", total_size))
+    console.print(styled("  [dim]Roots:[/dim] {}", ", ".join(roots)))
+
+    git = descriptor.provenance.git
+    if git is None:
+        console.print(Text.from_markup("  [dim]Dirty: unavailable (not a git work tree)[/dim]"))
+    elif git.dirty:
+        console.print(styled("  [yellow]Dirty:[/yellow] {}", ", ".join(git.dirty)))
+    else:
+        console.print(Text.from_markup("  [dim]Dirty: clean[/dim]"))
+
+    for warning in warnings:
+        console.print(styled("  [yellow]⚠[/yellow] {}", warning))
+    return True
+
+
+def _bundle_entry_root(logical_path: str) -> str:
+    """Return the materialization root represented by a logical bundle path."""
+    parts = logical_path.split("/")
+    if len(parts) < 3:
+        return logical_path
+    if parts[1] == "registry" and len(parts) >= 4:
+        return "/".join(parts[:4])
+    return "/".join(parts[:3])
+
+
+def _secret_delivery_label(secret: StepSecretRef) -> str:
+    """Render a secret's delivery as ``env: NAME`` / ``header: NAME``.
+
+    The delivery name is authored in the workflow file itself, so it is safe
+    to print — unlike the environment document's ``source.env`` variable
+    name, which this report never discloses.
+    """
+    if secret.delivery.env is not None:
+        return f"env: {secret.delivery.env}"
+    assert secret.delivery.header is not None
+    return f"header: {secret.delivery.header}"
+
+
+def _report_secret_bindings(
+    config: WorkflowConfig,
+    environment: ResolvedEnvironment,
+    console: MarkupFreeConsole,
+) -> None:
+    """Print the secret bindings and consumers in effect under ``--environment``.
+
+    Two tables: the environment's declared bindings (name, source kind, allow
+    list) and the workflow's consumers (consumer, ref, scope, delivery). The
+    report deliberately prints **no secret values and no source variable
+    names** — a binding whose source variable is unset on this machine is
+    marked ``(unset)`` instead, mirroring the validator's warning. Presence
+    checks use ``os.environ.get(...) is None`` only; no resolver or redactor
+    is ever instantiated on the validate path.
+
+    The caller gates this report on ``_has_secret_references`` — a workflow
+    with no secret references gets no section at all (the lazy-gate
+    precedent: bare validate must produce zero new output and zero new I/O
+    for secret-free workflows).
+
+    Args:
+        config: The validated workflow configuration.
+        environment: The resolved environment the manifest compiled against.
+        console: Rich console for output.
+    """
+    from conductor.config.validator import _secret_step_consumers
+
+    console.print(Text.from_markup("\n[bold]Secret Bindings[/bold]"))
+
+    bindings = environment.document.secrets or {}
+    binding_table = Table(show_header=True, header_style="bold", box=None)
+    binding_table.add_column("Name")
+    binding_table.add_column("Source")
+    binding_table.add_column("Allow")
+    for name, binding in sorted(bindings.items()):
+        env_var = binding.source.env
+        source_kind = "env" if env_var is not None else "other"
+        if env_var is not None and os.environ.get(env_var) is None:
+            source_kind = "env (unset)"
+        if binding.allow is None:
+            allow = "all"
+        else:
+            allow = ", ".join(binding.allow) if binding.allow else "none"
+        binding_table.add_row(name, source_kind, allow)
+    console.print(binding_table)
+
+    consumers_table = Table(show_header=True, header_style="bold", box=None)
+    consumers_table.add_column("Consumer")
+    consumers_table.add_column("Ref")
+    consumers_table.add_column("Scope")
+    consumers_table.add_column("Delivery")
+    for key, step in _secret_step_consumers(config):
+        assert step.execution is not None
+        for secret in step.execution.secrets:
+            consumers_table.add_row(key, secret.ref, secret.scope, _secret_delivery_label(secret))
+    for server_name in sorted(config.workflow.runtime.mcp_servers):
+        server = config.workflow.runtime.mcp_servers[server_name]
+        for secret in server.secrets:
+            consumers_table.add_row(
+                f"mcp:{server_name}", secret.ref, secret.scope, _secret_delivery_label(secret)
+            )
+    console.print(consumers_table)
 
 
 def _report_telemetry_sdk(console: MarkupFreeConsole) -> None:

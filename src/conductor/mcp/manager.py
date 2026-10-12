@@ -26,6 +26,7 @@ from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 from typing import Any
 
+from conductor import redaction
 from conductor.config.schema import ToolOutputConfig
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,14 @@ MCP_SDK_AVAILABLE = ClientSession is not None
 
 
 _MISSING: Any = object()
+
+
+def _scrub_log_value(obj: Any) -> Any:
+    """Scrub a runtime-derived log or public-error value for the active run."""
+    active = redaction.current()
+    if active is None:
+        return obj
+    return active.scrub(obj)
 
 
 def _mcp_field(model: Any, current_name: str, legacy_name: str) -> Any:
@@ -193,7 +202,12 @@ class MCPManager:
         if name in self._connection_tasks:
             raise RuntimeError(f"MCP server '{name}' is already connected or connecting")
 
-        logger.info(f"Connecting to MCP server '{name}': {command} {args or []}")
+        logger.info(
+            "Connecting to MCP server '%s': %s %s",
+            name,
+            _scrub_log_value(command),
+            _scrub_log_value(args or []),
+        )
 
         # Build server parameters
         server_params = server_parameters_type(
@@ -273,7 +287,11 @@ class MCPManager:
                         results = list(cleanup.result())
             for result in results:
                 if isinstance(result, Exception):
-                    logger.warning(f"Error cancelling MCP connection '{name}': {result}")
+                    logger.warning(
+                        "Error cancelling MCP connection '%s': %s",
+                        name,
+                        _scrub_log_value(str(result)),
+                    )
             self._connection_tasks.pop(name, None)
             self._connection_stops.pop(name, None)
             self._discard_server_state(name)
@@ -290,8 +308,16 @@ class MCPManager:
                     name,
                 )
             else:
-                logger.error(f"Failed to connect to MCP server '{name}': {exc}", exc_info=exc)
-            raise RuntimeError(f"Failed to connect to MCP server '{name}': {exc}") from exc
+                scrubbed_exc = _scrub_log_value(str(exc))
+                if redaction.current() is None:
+                    logger.error(
+                        "Failed to connect to MCP server '%s': %s", name, scrubbed_exc, exc_info=exc
+                    )
+                else:
+                    logger.error("Failed to connect to MCP server '%s': %s", name, scrubbed_exc)
+            raise RuntimeError(
+                f"Failed to connect to MCP server '{name}': {_scrub_log_value(str(exc))}"
+            ) from exc
 
         logger.info(
             f"Connected to MCP server '{name}' with {len(tools)} tools: "
@@ -333,8 +359,10 @@ class MCPManager:
         original_name = prefixed_name.split("__", 1)[1]
 
         logger.debug(
-            f"Calling MCP tool '{original_name}' on server '{server_name}' "
-            f"with arguments: {arguments}"
+            "Calling MCP tool '%s' on server '%s' with arguments: %s",
+            original_name,
+            server_name,
+            _scrub_log_value(arguments),
         )
 
         try:
@@ -360,6 +388,12 @@ class MCPManager:
             if not response_text and structured:
                 response_text = str(structured)
 
+            # Scrub the complete response before tool-result truncation can
+            # split a registered value and make exact-match redaction miss it.
+            # This copy is logging-only; the returned result stays raw and
+            # follows the configured truncation/spill contract below.
+            scrubbed_full = _scrub_log_value(response_text)
+
             try:
                 response_text = self._maybe_truncate_response(
                     response_text,
@@ -374,15 +408,39 @@ class MCPManager:
                 logger.warning(
                     "Failed to apply output truncation for %s; returning untruncated result: %s",
                     prefixed_name,
-                    truncation_err,
+                    _scrub_log_value(str(truncation_err)),
                 )
 
-            logger.debug(f"MCP tool '{original_name}' returned: {response_text[:200]}...")
+            # Scrub the COMPLETE response before slicing the preview: a secret
+            # starting inside the 200-char window would otherwise leave its
+            # leading characters in the log (exact-match redaction cannot see
+            # a value the slice truncated). A marker the boundary splits is
+            # completed rather than left as a broken token.
+            preview = scrubbed_full[:200]
+            # Complete a marker the boundary split — but only when a redactor
+            # actually replaced values: with no active redactor an ordinary
+            # response containing a literal ``***redacted***`` must log
+            # byte-identically to the pre-fix preview.
+            active = redaction.current()
+            if active is not None and active.active:
+                marker = redaction.REDACTED_MARKER
+                for width in range(len(marker) - 1, 0, -1):
+                    if preview.endswith(marker[:width]) and scrubbed_full[
+                        len(preview) :
+                    ].startswith(marker[width:]):
+                        preview = scrubbed_full[: len(preview) + (len(marker) - width)]
+                        break
+            logger.debug(
+                "MCP tool '%s' returned: %s...",
+                original_name,
+                preview,
+            )
             return response_text
 
         except Exception as e:
-            logger.error(f"MCP tool call failed: {prefixed_name}: {e}")
-            raise RuntimeError(f"MCP tool call failed: {prefixed_name}: {e}") from e
+            scrubbed_error = _scrub_log_value(str(e))
+            logger.error("MCP tool call failed: %s: %s", prefixed_name, scrubbed_error)
+            raise RuntimeError(f"MCP tool call failed: {prefixed_name}: {scrubbed_error}") from e
 
     async def call_tool_structured(
         self,
@@ -440,7 +498,9 @@ class MCPManager:
         try:
             result = await session.call_tool(tool_name, arguments=arguments)
         except Exception as e:
-            raise RuntimeError(f"MCP tool call failed: {tool_name}: {e}") from e
+            raise RuntimeError(
+                f"MCP tool call failed: {tool_name}: {_scrub_log_value(str(e))}"
+            ) from e
 
         content: list[dict[str, Any]] = []
         for block in result.content or []:
@@ -595,7 +655,7 @@ class MCPManager:
                 ):
                     logger.warning(
                         "Spill dir %s contains a symlink; refusing to write tool output spill.",
-                        spill_dir,
+                        _scrub_log_value(str(spill_dir)),
                     )
                     return None
             else:
@@ -605,7 +665,7 @@ class MCPManager:
                     logger.warning(
                         "Default spill dir %s contains a symlink; "
                         "refusing to write tool output spill.",
-                        spill_dir,
+                        _scrub_log_value(str(spill_dir)),
                     )
                     return None
 
@@ -644,9 +704,9 @@ class MCPManager:
                     logger.warning(
                         "Spill dir %s has permissions %04o and chmod failed: %s; "
                         "refusing to write tool output spill.",
-                        spill_dir,
+                        _scrub_log_value(str(spill_dir)),
                         current_mode,
-                        chmod_err,
+                        _scrub_log_value(str(chmod_err)),
                     )
                     return None
             safe_server = _sanitize_for_filename(server_name)
@@ -679,7 +739,7 @@ class MCPManager:
         except (OSError, ValueError) as e:
             logger.warning(
                 "Failed to spill full MCP tool output to disk: %s",
-                e,
+                _scrub_log_value(str(e)),
             )
             return None
 
@@ -760,6 +820,6 @@ class MCPManager:
         self._connection_stops.clear()
         for result in results:
             if isinstance(result, Exception):
-                logger.warning(f"Error closing MCP connections: {result}")
+                logger.warning("Error closing MCP connections: %s", _scrub_log_value(str(result)))
 
         logger.debug("MCP manager closed")

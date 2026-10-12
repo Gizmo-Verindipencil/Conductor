@@ -14,8 +14,10 @@ This document provides a comprehensive reference for the Conductor workflow YAML
 - [Skills](#skills)
 - [Plugins](#plugins)
 - [Execution Profiles](#execution-profiles)
+- [Secret Bindings](#secret-bindings)
 - [Context Compaction](#context-compaction)
 - [External File References](#external-file-references)
+- [Run Bundles](#run-bundles)
 
 ## Workflow Configuration
 
@@ -668,8 +670,10 @@ not load them; the error suggests removing `setting_sources` or using
 `auth_mode: auto`, which keeps settings tiers available.
 
 The readiness check confirms that a credential path is usable before each
-agent runs. It is **not billing attribution**, and it is not evidence of which
-account a model call was billed to.
+agent runs. On its own it is not evidence of which account a model call was
+billed to. Billing source is derived separately, per execution, from the child
+environment, the settings tiers and the probe, and defaults to `unknown` when
+it cannot be proven; see [Cost labels and billing source](#cost-labels-and-billing-source).
 
 `conductor doctor --check` reports the check's result as two groups: a
 `Conductor:` line with Conductor's own `requested_mode` / `inferred_mode`, and
@@ -699,6 +703,45 @@ See the [Authentication](providers/experimental.md#authentication-claude-agent-s
 section of the experimental-providers guide and the
 [configuration guide](configuration.md#field-compatibility-by-provider) for
 field compatibility across providers.
+
+#### Cost labels and billing source
+
+A cost figure in Conductor is always an **estimate** computed from token counts
+and a price table. Each `claude-agent-sdk` execution records where its usage was
+billed, and every figure whose billing source requires clarification receives
+the matching label. Metered-API executions and providers that do not report a
+billing source keep today's unlabelled presentation.
+
+| Billing source | Label |
+|---|---|
+| none reported, or `metered_api` | *(no label; unchanged)* |
+| `subscription` | `API-equivalent estimate` |
+| `unknown` (reported, but not proven) | `billing source unknown` |
+| several sources in one total | `mixed billing` (the console summary adds the breakdown, for example `mixed billing: 2 subscription, 1 metered API`) |
+
+`API-equivalent estimate` means the tokens were priced at API rates; it is not
+an invoice or an additional charge. A total's label follows the specific
+classes it combines, never a majority or dominant mode: executions that are
+all the same single class (all `subscription`, or all `metered_api`) keep that
+class's label; a `subscription` or `metered_api` execution combined with
+providers that report nothing reads `mixed billing`; `unknown` combined only
+with providers that report nothing reads `billing source unknown`, not
+`mixed`; and a total where nothing reported a billing source carries no label
+at all. Table cells in the Fleet Manager use the compact forms `est.`,
+`src?` and `mixed`; see [Status vocabulary](fleet.md#status-vocabulary) in
+the Fleet guide for exactly where each is expanded. The label appears in
+the console usage summary, per-execution progress lines, budget messages,
+`conductor status`, the web dashboard, the Fleet Runs, Run Detail and History
+screens, and as `billing_mode` on agent completion events and `billing` in
+`conductor status --json` and MCP run-status payloads.
+
+Subscription detection relies on CLI-reported `apiProvider` /
+`subscriptionType` evidence. A prior readiness-plus-inference run observed a
+first-party subscription login and subscription billing provenance; that
+observation is provisional until it is revalidated, and fake-key behavior,
+auto-mode or API-key precedence, fallback, wider compatibility and broader
+environment coverage remain unvalidated. Missing or different evidence degrades
+safely to `unknown`.
 
 ### Native Tools (`native_tools`)
 
@@ -1434,6 +1477,30 @@ When the tool returns structured content (a dictionary under `structured`), its 
 {{ read_spec.output.record_id }}       # Merged structured field
 ```
 
+Many widely used MCP servers return data **only** as a JSON string in
+`content[0].text` and never populate `structuredContent` (`structured` stays
+`null`). Use the `fromjson` filter — the inverse of `json` — to parse that
+text into native data for downstream arguments and route conditions:
+
+```jinja2
+{{ (get_mr.output.content[0].text | fromjson).labels | tojson }}    # Parse, then re-serialize for an arguments value
+```
+
+When the parsed value feeds an `arguments` mapping, keep it JSON: a bare
+`{{ ... }}` interpolation stringifies the collection with Python `repr`
+(single quotes, `None` instead of `null`, escaped newlines) before the YAML
+coercion pass, corrupting values, while `tojson` emits valid JSON that the
+coercion pass parses back into the same native value. In route conditions,
+test the collection itself rather than interpolating it — an empty list
+renders as the truthy string `"[]"`:
+
+```jinja2
+{{ (get_mr.output.content[0].text | fromjson).labels | length > 0 }}    # Route condition: fire only when labels exist
+```
+
+`fromjson` raises a `TemplateError` explaining whether the value was not a
+string or did not hold valid JSON.
+
 The base keys `content`, `structured`, and `is_error` are reserved by the envelope, and `outputs` / `errors` are additionally reserved because the workflow engine recognizes parallel/for-each group outputs by exactly those two top-level keys — a structured result flattening them would make the step's output indistinguishable from a group output. If the structured dictionary contains colliding keys, the envelope wins, the colliding keys are omitted from the merge with a debug-level log message, and they stay reachable under `output.structured.<key>`.
 
 **`is_error` semantics and routing:**
@@ -2029,7 +2096,10 @@ workflow:
 ### Cost Budget
 
 - `budget_usd` caps cumulative LLM cost across the run. When unset (default), no
-  budget tracking occurs.
+  budget tracking occurs. `budget_usd` limits the estimated cost computed from
+  token counts at API rates. For subscription and mixed runs that estimate is a
+  deterministic proxy for token consumption; it is not a limit on, or a
+  measurement of, subscription quota, plan usage, or money.
 - `budget_mode: audit` (default) emits a `budget_exceeded` event and logs a
   warning on first overshoot, but the workflow continues — use this to discover
   cost profiles before enforcing.
@@ -3028,6 +3098,64 @@ When resolving a step's execution profile, Conductor applies a three-tier preced
 
 If none of these three tiers provides a profile, Conductor raises a validation error for that step.
 
+### Docker Execution Profiles for Script Steps
+
+When an execution profile resolves to `backend: docker`, script steps (`type: script`) execute inside short-lived containers against a run-scoped named volume:
+
+```yaml
+workflow:
+  name: containerized-build
+  entry_point: run_in_docker
+
+  defaults:
+    execution:
+      profile: container_build
+
+agents:
+  - name: run_in_docker
+    type: script
+    command: make
+    args: ["test"]
+    working_dir: scripts
+    routes:
+      - to: $end
+```
+
+#### Working Directory Mapping (`working_dir`)
+
+For script steps running on a Docker profile, `working_dir` resolves against the `/workspace` volume:
+
+* **Omitted (`None`)**: Defaults to the workspace root `/workspace`.
+* **Relative paths** (e.g. `scripts` or `build/out`): Resolved relative to `/workspace/main/` (for example, `/workspace/main/scripts`).
+* **POSIX absolute paths** (e.g. `/tmp` or `/app`): Passed verbatim to the container.
+* **Rejected paths**: Windows drive paths (such as `C:\app`), paths containing backslashes (`scripts\test.sh`), empty path strings, and relative paths using `..` to escape `/workspace/main/` are rejected with configuration errors.
+
+#### Mixed-Backend Workflow Warnings
+
+Workflows may combine `local` and `docker` script steps. When an environment document resolves script steps to both backends, `conductor validate` and the runtime engine emit a warning disclosing the snapshot boundary:
+
+```
+environment 'demo' mixes local and docker script backends: host_step (local), container_step (docker). Docker steps see the bundle snapshot collected before the run, not host filesystem mutations made by local steps.
+```
+
+Docker steps execute against the pre-staged content-addressed run bundle in the named volume. Changes made to the host filesystem by earlier local script steps are not automatically mirrored into the container volume.
+
+#### Non-Script Steps Reserved Errors
+
+In this release, `backend: docker` is available for `type: script` steps only. Assigning a Docker execution profile to LLM agents (`type: agent`), direct MCP tool steps (`type: mcp`), or sub-workflows (`type: workflow`) fails validation and manifest compilation:
+
+```
+Step '<name>' resolves to backend 'docker' in environment '<env>', but backend 'docker' is available for script steps only; agent execution realms arrive in step 7.
+```
+
+#### Environment Inheritance (`inherit_control_environment`)
+
+The `inherit_control_environment` setting behaves differently depending on the backend:
+
+* **Local backend**: Defaults to effective `true` (subprocesses inherit the host `os.environ`).
+* **Docker backend**: Defaults to effective `false` (containers do not inherit the host environment; only declared secret deliveries and step `env` entries are passed).
+* **Validation warning**: Setting `inherit_control_environment: true` on a Docker profile triggers a validation warning because it copies the full host environment into container metadata visible to Docker daemon administrators via `docker inspect`.
+
 ### Engine-Local Steps
 
 Engine-local step types do not execute on a runner backend. They reject the `execution:` block with a schema error:
@@ -3040,6 +3168,140 @@ Engine-local step types do not execute on a runner backend. They reject the `exe
 ### Execution Environment Documents
 
 Execution profiles are resolved against environment documents defined in project or user configuration. See [Execution Environments](configuration.md#execution-environments) for details on document format, discovery rules, and resolution precedence.
+
+## Secret Bindings
+
+Secret bindings provide a secure, declarative way for workflow steps and MCP servers to request credentials without hardcoding secrets or relying on ambient environment variables.
+
+Workflows declare logical secret references at the step or server level. An execution environment document (see [Execution Environments](configuration.md#execution-environments)) binds those logical names to credential sources and enforces consumer access rules.
+
+### Use-Sites
+
+#### 1. Executable Step Secrets (`execution.secrets`)
+
+Script steps declare secret references in the `execution.secrets` list:
+
+```yaml
+agents:
+  - name: deploy_package
+    type: script
+    execution:
+      profile: shell
+      secrets:
+        - ref: deploy_token
+          scope: script
+          delivery:
+            env: DEPLOY_API_TOKEN
+    command: python
+    args: ["scripts/deploy.py"]
+    routes:
+      - to: $end
+```
+
+#### 2. MCP Server Secrets (`runtime.mcp_servers.<name>.secrets`)
+
+Workflow-declared MCP servers configure secrets under `secrets`:
+
+```yaml
+workflow:
+  name: mcp-workflow
+  entry_point: run_query
+  runtime:
+    mcp_servers:
+      remote_api:
+        type: http
+        url: https://api.example.com/mcp
+        secrets:
+          - ref: service_token
+            scope: mcp
+            delivery:
+              header: Authorization
+```
+
+### Secret Reference Fields
+
+Each secret reference in `secrets:` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ref` | string (required) | Logical secret name matching `[A-Za-z0-9_.-]+`. Must match a binding in the resolved environment document. |
+| `scope` | string (required) | Target consumer scope: `script` or `mcp`. `agent` is reserved for future releases. |
+| `delivery` | object (required) | Delivery mechanism. Exactly one of `env` or `header` must be set. |
+
+### Delivery Targets (`delivery`)
+
+- **`env`**: Injects the secret value into an environment variable for the script subprocess or MCP server. Must be a valid shell identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+- **`header`**: Injects the secret value as an HTTP request header. Header delivery applies only to HTTP/SSE MCP servers; it is rejected on script steps and stdio MCP servers. Header names must follow RFC 9110 token rules (`[!#$%&'*+\-.^_`|~0-9A-Za-z]+`). Prefer `delivery.header` for remote authentication.
+
+MCP transport and delivery support is based on the effective providers of the agents that can consume the workflow's declared servers. Per-agent `provider:` overrides take precedence over the workflow default.
+
+| Provider | stdio | HTTP/SSE | stdio env | remote header | remote env |
+|---|---|---|---|---|---|
+| Copilot | Yes | Yes | Yes | Yes | Yes |
+| Claude | Yes | No (rejected before run) | Yes | n/a | n/a |
+| OpenAI | Yes | No (rejected before run) | Yes | n/a | n/a |
+| Claude Agent SDK | Yes | Yes | Yes | Yes | No (config shape accepts only url/headers) |
+| Hermes | No MCP | No MCP | n/a | n/a | n/a |
+| ACA | Forwarded to runner | Forwarded to runner | per inner-runner contract | per inner-runner contract | per inner-runner contract |
+
+Remote servers used by an effective Claude or OpenAI consumer are rejected by both `conductor validate` and manifest compilation; they are never silently passed through. Direct `type: mcp` steps are a separate, provider-independent path and support stdio only, so they are not counted as provider MCP consumers.
+
+### Scope and Validation Rules
+
+1. **Scope Requirements**:
+   - `scope: script` is required for script steps.
+   - `scope: mcp` is required for MCP servers.
+   - `scope: agent` is reserved for future agent execution realms (architecture step 7). Using `agent` scope raises a validation error.
+2. **Delivery Collisions**:
+   - Literal `env` and secret `env` delivery names within the same consumer must be unique.
+   - Literal `headers` and secret `header` delivery names within the same consumer must be unique (case-insensitive).
+3. **Redaction**:
+   - Registered secret values are automatically sanitized across event streams, checkpoints, terminal records, and CLI output displays.
+
+### End-to-End Example
+
+Given an environment document `.conductor/environments/prod.yaml`:
+
+```yaml
+default: shell
+profiles:
+  shell:
+    backend: local
+
+secrets:
+  service_key:
+    source:
+      env: PROD_SERVICE_KEY
+    allow: [script]
+```
+
+A workflow file consuming the secret:
+
+```yaml
+workflow:
+  name: secrets-demo
+  entry_point: query_service
+
+agents:
+  - name: query_service
+    type: script
+    execution:
+      secrets:
+        - ref: service_key
+          scope: script
+          delivery:
+            env: API_KEY
+    command: python
+    args: ["-c", "import os; print('Key present:', bool(os.environ.get('API_KEY')) )"]
+    routes:
+      - to: $end
+```
+
+Run with:
+
+```bash
+PROD_SERVICE_KEY=secret-value conductor run workflow.yaml --environment prod
+```
 
 ## External File References
 
@@ -3338,6 +3600,79 @@ Only UTF-8 text files are supported. Non-UTF-8 files produce a `ConfigurationErr
 - **No conditional includes** — File references cannot be parameterized or conditional
 - **No caching** — Each `!file` reference reads the file independently
 - **Jinja includes search root**: Relative template includes (`{% include %}`, etc.) resolve only against the prompt file's own directory, with no fallback to the workflow directory or current working directory.
+
+## Run Bundles
+
+The `workflow.bundle` block declares static asset files and extra authorized filesystem roots for run bundle packaging.
+
+A run bundle collects the complete statically knowable file closure needed to run a workflow on remote or containerized backends. This closure includes included files (`!file` and `!yamlfile`), Jinja2 template partials, sub-workflows, skills, plugins, and declared assets.
+
+```yaml
+workflow:
+  name: deployment-pipeline
+  entry_point: build
+
+  bundle:
+    assets:
+      - "scripts/*.sh"
+      - ".github/workflows/deploy.yml"
+    additional_roots:
+      - "../shared-configs"
+```
+
+### Schema Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `assets` | `list[str]` | `[]` | Glob patterns or relative paths to files that should be packaged in the bundle. Anchored to the workflow directory. |
+| `additional_roots` | `list[str]` | `[]` | Extra filesystem root directories authorized for file collection. |
+
+### Asset Paths and Glob Semantics
+
+* **Relative Paths Only:** Every entry in `assets` must be a relative path anchored to the directory containing the workflow file. Absolute paths (POSIX `/` or Windows drive paths) and paths starting with `~` are rejected with schema validation errors.
+* **Hidden Files and Directories:** Asset patterns use glob expansion with `include_hidden=False`. Standard wildcards like `*` or `scripts/*` ignore hidden files and directories. To match hidden paths, specify the dot prefix explicitly, such as `.github/**`.
+
+### Additional Roots
+
+By default, file collection is strictly confined to the workflow file's directory and pre-authorized cache locations (registry cache, plugin checkouts, and installed skills).
+
+If your workflow references external files or sub-workflows residing in parent or sibling directories (for example, `!file ../shared/prompt.md`), declare those directories in `additional_roots`. Entries in `additional_roots` may be relative paths or absolute paths.
+
+### Bundle Errors and Remedies
+
+When building a bundle or validating a closure, Conductor enforces static completeness and security boundaries:
+
+#### Dynamic Jinja Includes
+
+Jinja2 template includes inside file-backed prompt templates must resolve to static paths during collection. Dynamic expressions such as `{% include template_name %}` cannot be resolved statically and trigger `BundleDynamicTemplateError`.
+
+* **Remedy:** Replace dynamic template variables with literal template path strings, or provide a static list of candidates:
+
+```jinja2
+{# Avoid dynamic template variables #}
+{% include selected_prompt %}
+
+{# Use literal includes or static candidate lists instead #}
+{% include "prompts/fallback.md" %}
+{% include ["prompts/custom.md", "prompts/default.md"] ignore missing %}
+```
+
+#### Root Escapes
+
+If an included file, sub-workflow, or asset references a path outside the workflow directory and pre-authorized caches without authorization, collection fails with `BundleRootEscapeError` or `BundleSymlinkEscapeError`.
+
+* **Remedy:** Declare the external directory in `workflow.bundle.additional_roots`:
+
+```yaml
+workflow:
+  bundle:
+    additional_roots:
+      - "../shared-prompts"
+```
+
+### Runtime Execution Note
+
+The `workflow.bundle` section is consumed by `conductor bundle build` and `conductor validate --environment`. Standard local execution via `conductor run` and `conductor resume` ignores this block.
 
 ## Complete Example
 

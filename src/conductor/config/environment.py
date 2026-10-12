@@ -19,11 +19,11 @@ explicit, and shadowing keeps every resolved document byte-accountable to
 one file on disk (plus one digest).
 
 Documents are loaded as **plain YAML with no ``${VAR}`` expansion**.
-Secrets are expected to arrive as typed references in a later step, and
-silently expanding machine-dependent environment variables inside an
-environment document would be an anti-hermetic vector — the same document
-would resolve to different backends on different machines with nothing in
-the file to say why.
+Secrets arrive as typed references in the document's ``secrets`` mapping
+(each mapping a secret name to a source behind the resolution seam, such as
+an environment variable), and the document contains no secret values — silently
+expanding machine-dependent environment variables across the entire document
+would be an anti-hermetic vector.
 
 Importing this module performs no I/O: every filesystem access happens
 inside an explicit function call.
@@ -31,21 +31,20 @@ inside an explicit function call.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from conductor.digest import canonical_json_digest
 from conductor.exceptions import ConfigurationError
 
 logger = logging.getLogger(__name__)
@@ -53,14 +52,26 @@ logger = logging.getLogger(__name__)
 WarningSink = Callable[[str], None]
 """Sink for non-fatal diagnostics, mirroring ``skills.registry.WarningSink``."""
 
-# Execution backends compiled into this build of Conductor. Step 2 ships the
-# local subprocess backend only; the registry is a module constant so later
-# backends widen it in one place.
-AVAILABLE_BACKEND_NAMES = frozenset({"local"})
+# Execution backends compiled into this build of Conductor.
+# Widened to include "docker" runner backend.
+AVAILABLE_BACKEND_NAMES = frozenset({"local", "docker"})
 
 # Environment names map directly to ``<name>.yaml``, so the charset excludes
 # path separators and dots; anything outside it must be written as a path.
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+# Secret binding names map to logical identifiers, supporting letters,
+# digits, underscores, dots, and hyphens.
+_SECRET_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9_.-]+\Z")
+
+# Environment variable names for secret bindings must be valid shell identifiers.
+_ENV_VAR_NAME_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# Docker user syntax pattern: <name|uid>[:<group|gid>]
+_DOCKER_USER_PATTERN = re.compile(r"\A[0-9a-zA-Z_][0-9a-zA-Z_.-]*(:[0-9a-zA-Z_][0-9a-zA-Z_.-]*)?\Z")
+
+# Size unit pattern for memory and tmpfs limits (\d+[mg])
+_SIZE_PATTERN = re.compile(r"\A(\d+)([mg])\Z")
 
 # Project-level environment documents live here, relative to each walked
 # ancestor of the workflow file.
@@ -77,6 +88,179 @@ _REPO_MARKER = ".git"
 _yaml = YAML(typ="safe")
 
 
+class SecretBindingSource(BaseModel):
+    """Source configuration for resolving a secret binding.
+
+    v1 supports the ``env`` source kind exclusively. Future vault/keychain
+    sources will add optional fields to this model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    env: str | None = None
+    """Environment variable name providing the secret value."""
+
+    @field_validator("env")
+    @classmethod
+    def _validate_env_var_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or _ENV_VAR_NAME_PATTERN.match(stripped) is None:
+            raise ValueError(
+                f"Invalid environment variable name '{value}': must be non-empty and "
+                f"match {_ENV_VAR_NAME_PATTERN.pattern} (letters, digits, and underscores, "
+                "not starting with a digit)."
+            )
+        return stripped
+
+    @model_validator(mode="after")
+    def _validate_exactly_one_source_kind(self) -> SecretBindingSource:
+        set_kinds = [k for k in ("env",) if getattr(self, k) is not None]
+        if len(set_kinds) != 1:
+            raise ValueError("exactly one source kind must be set (supported source kinds: env)")
+        return self
+
+
+class SecretBinding(BaseModel):
+    """A secret binding declaring its source and allowed consumer classes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: SecretBindingSource
+    """Source resolving the secret value."""
+
+    allow: list[Literal["script", "mcp"]] | None = None
+    """Allowed consumer classes for this secret.
+
+    When ``None`` (the default), all consumer classes are allowed forever.
+    When set to an empty list (``[]``), the binding is explicitly fail-closed
+    and accessible to no consumer classes.
+    """
+
+
+class DockerResources(BaseModel):
+    """Resource limits for container execution.
+
+    All limits are optional: an unset limit means no daemon-level ceiling
+    is configured (the container shares host resources with other processes).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpu: float | None = Field(default=None, ge=0.1, le=64.0)
+    """CPU limit in cores (e.g. 0.5, 2.0). Bounded between 0.1 and 64 cores."""
+
+    memory: str | None = None
+    """Memory limit formatted as '<number>[m|g]' (e.g. '512m', '2g').
+
+    Bounded between 16 MiB (16m) and 65,536 MiB (64g).
+    """
+
+    pids: int | None = Field(default=None, ge=16, le=65536)
+    """Process limit. Bounded between 16 and 65536."""
+
+    @field_validator("memory")
+    @classmethod
+    def _validate_memory(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip().lower()
+        match = _SIZE_PATTERN.match(stripped)
+        if not match:
+            raise ValueError(
+                f"Invalid memory limit '{value}': must match pattern \\d+[mg] (e.g. '512m', '2g')"
+            )
+        num = int(match.group(1))
+        unit = match.group(2)
+        mib = num * 1024 if unit == "g" else num
+        if mib < 16 or mib > 65536:
+            raise ValueError(
+                f"Memory limit '{value}' out of bounds: must be between 16m and 64g (65536m)"
+            )
+        return stripped
+
+
+class DockerProfileOptions(BaseModel):
+    """Configuration options for a Docker execution profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str
+    """Container image reference (tag or digest)."""
+
+    platform: Literal["linux/amd64", "linux/arm64"] | None = None
+    """Target platform for the container image (None = auto-resolved by Docker)."""
+
+    network: Literal["none", "bridge", "host"] | None = None
+    """Container network mode (None = daemon default)."""
+
+    user: str | None = None
+    """Container user in docker syntax '<name|uid>[:<group|gid>]' (None = image USER)."""
+
+    init: bool = False
+    """Whether to use a container init process (docker --init)."""
+
+    read_only: bool = False
+    """Whether to mount the container's root filesystem as read-only."""
+
+    cap_drop_all: bool = False
+    """Whether to drop all Linux capabilities (docker --cap-drop=ALL)."""
+
+    no_new_privileges: bool = False
+    """Whether to prevent the container from gaining additional privileges."""
+
+    tmpfs: bool | str = False
+    """Tmpfs mount configuration: False = disabled, True = /tmp, or size string (e.g. '1g')."""
+
+    resources: DockerResources = Field(default_factory=DockerResources)
+    """Resource constraints for container execution."""
+
+    @field_validator("image")
+    @classmethod
+    def _validate_image(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped or bool(re.search(r"\s", stripped)):
+            raise ValueError("image must be a non-empty string without whitespace")
+        return stripped
+
+    @field_validator("user")
+    @classmethod
+    def _validate_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or _DOCKER_USER_PATTERN.match(stripped) is None:
+            raise ValueError(
+                f"Invalid user '{value}': must match docker user syntax <name|uid>[:<group|gid>] "
+                f"and pattern {_DOCKER_USER_PATTERN.pattern}"
+            )
+        return stripped
+
+    @field_validator("tmpfs", mode="before")
+    @classmethod
+    def _validate_tmpfs(cls, value: Any) -> bool | str:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            match = _SIZE_PATTERN.match(stripped)
+            if not match:
+                raise ValueError(
+                    f"Invalid tmpfs size '{value}': must be a boolean or match pattern \\d+[mg] "
+                    "(e.g. '512m', '1g')"
+                )
+            num = int(match.group(1))
+            unit = match.group(2)
+            mib = num * 1024 if unit == "g" else num
+            if mib < 1 or mib > 16384:
+                raise ValueError(
+                    f"tmpfs size '{value}' out of bounds: must be between 1m and 16g (16384m)"
+                )
+            return stripped
+        raise ValueError("tmpfs must be a boolean or size string (e.g. '1g', '512m')")
+
+
 class ProfileDefinition(BaseModel):
     """One named execution profile inside an environment document."""
 
@@ -84,6 +268,17 @@ class ProfileDefinition(BaseModel):
 
     backend: str
     """Runner backend implementing this profile, from ``AVAILABLE_BACKEND_NAMES``."""
+
+    inherit_control_environment: bool | None = None
+    """Whether commands run under this profile inherit the host control process's environment.
+
+    When ``None`` (the default), the runner backend's default applies (the local
+    subprocess backend defaults to effective ``True``, while future remote backends
+    default to effective ``False``).
+    """
+
+    docker: DockerProfileOptions | None = None
+    """Docker execution options, required if and only if backend is 'docker'."""
 
     @field_validator("backend")
     @classmethod
@@ -95,6 +290,31 @@ class ProfileDefinition(BaseModel):
                 f"Conductor (available: {available})"
             )
         return value
+
+    @model_validator(mode="after")
+    def _validate_docker_options(self) -> ProfileDefinition:
+        if self.backend == "docker" and self.docker is None:
+            raise ValueError(
+                "profile with backend 'docker' requires a 'docker' configuration block"
+            )
+        if self.backend != "docker" and self.docker is not None:
+            raise ValueError(
+                f"profile with backend '{self.backend}' cannot specify a "
+                "'docker' configuration block"
+            )
+        return self
+
+    def model_dump(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        dump = super().model_dump(*args, **kwargs)
+        if dump.get("inherit_control_environment") is None:
+            dump.pop("inherit_control_environment", None)
+        if dump.get("docker") is None:
+            dump.pop("docker", None)
+        return dump
 
 
 class EnvironmentDocument(BaseModel):
@@ -118,6 +338,24 @@ class EnvironmentDocument(BaseModel):
     profiles: dict[str, ProfileDefinition] = Field(min_length=1)
     """Named execution profiles, each mapping to a runner backend."""
 
+    secrets: dict[str, SecretBinding] | None = None
+    """Named secret bindings declaring source and access policies."""
+
+    @field_validator("secrets")
+    @classmethod
+    def _validate_secret_names(
+        cls, value: dict[str, SecretBinding] | None
+    ) -> dict[str, SecretBinding] | None:
+        if value is None:
+            return None
+        for name in value:
+            if _SECRET_NAME_PATTERN.match(name) is None:
+                raise ValueError(
+                    f"Invalid secret binding name '{name}': names must match "
+                    f"{_SECRET_NAME_PATTERN.pattern} (letters, digits, '_', '.', and '-')."
+                )
+        return value
+
     @model_validator(mode="after")
     def _default_names_an_existing_profile(self) -> EnvironmentDocument:
         if self.default is not None and self.default not in self.profiles:
@@ -126,6 +364,22 @@ class EnvironmentDocument(BaseModel):
                 f"(defined: {', '.join(sorted(self.profiles))})"
             )
         return self
+
+    def model_dump(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        dump = super().model_dump(*args, **kwargs)
+        if dump.get("secrets") is None:
+            dump.pop("secrets", None)
+        for p in dump.get("profiles", {}).values():
+            if isinstance(p, dict):
+                if p.get("inherit_control_environment") is None:
+                    p.pop("inherit_control_environment", None)
+                if p.get("docker") is None:
+                    p.pop("docker", None)
+        return dump
 
 
 @dataclass(frozen=True)
@@ -155,13 +409,22 @@ class ResolvedEnvironment:
 def _document_digest(document: EnvironmentDocument) -> str:
     """Digest pinning an environment document's exact content.
 
-    Canonical form: JSON with sorted keys and tight separators, so the
-    digest depends on the document's data alone, never on insertion order
-    or formatting. Spelled ``sha256:<hex>``, matching the workflow-hash
-    convention in ``engine.checkpoint``.
+    Delegates to :func:`conductor.digest.canonical_json_digest` — canonical
+    form: JSON with sorted keys and tight separators, so the digest depends
+    on the document's data alone, never on insertion order or formatting.
+    Spelled ``sha256:<hex>``, matching the workflow-hash convention in
+    ``engine.checkpoint``.
     """
-    canonical = json.dumps(document.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+    dump = document.model_dump(mode="json")
+    if dump.get("secrets") is None:
+        dump.pop("secrets", None)
+    for p in dump.get("profiles", {}).values():
+        if isinstance(p, dict):
+            if p.get("inherit_control_environment") is None:
+                p.pop("inherit_control_environment", None)
+            if p.get("docker") is None:
+                p.pop("docker", None)
+    return canonical_json_digest(dump)
 
 
 def load_environment_document(path: Path) -> EnvironmentDocument:

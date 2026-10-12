@@ -21,6 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from conductor.redaction import RunRedactor
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +71,20 @@ class WorkflowEventEmitter:
         """Initialize the event emitter with an empty subscriber list."""
         self._subscribers: list[Callable[[WorkflowEvent], None]] = []
         self._lock = threading.Lock()
+        self._redactor: RunRedactor | None = None
+
+    def set_redactor(self, redactor: RunRedactor | None) -> None:
+        """Attach (or clear) the run-scoped redactor used to sanitize event payloads.
+
+        Idempotent — repeated calls with the same redactor are no-ops. While a
+        redactor is attached and :attr:`RunRedactor.active`, every emitted event
+        payload is scrubbed before dispatch; an inactive redactor performs zero
+        work and events pass through byte-identically.
+
+        Args:
+            redactor: The redactor to attach, or ``None`` to detach.
+        """
+        self._redactor = redactor
 
     def subscribe(self, callback: Callable[[WorkflowEvent], None]) -> None:
         """Register a callback to receive events.
@@ -91,6 +107,13 @@ class WorkflowEventEmitter:
     def emit(self, event: WorkflowEvent) -> None:
         """Emit an event to all registered subscribers.
 
+        Subscribers always receive a (possibly) sanitized copy: when a
+        redactor is attached and active, the event is replaced with a copy
+        whose payload is scrubbed *before* the subscriber snapshot, and the
+        caller's original event object is never mutated. When no redactor is
+        attached, or the attached redactor is inactive, the original event
+        object reaches subscribers unchanged (identity passthrough).
+
         Callbacks are invoked synchronously in registration order. If a
         callback raises an exception, it is logged and the remaining
         callbacks still execute.
@@ -98,6 +121,14 @@ class WorkflowEventEmitter:
         Args:
             event: The event to broadcast.
         """
+        redactor = self._redactor
+        if redactor is not None and redactor.active:
+            event = WorkflowEvent(
+                type=event.type,
+                timestamp=event.timestamp,
+                data=redactor.scrub_event_data(event.data),
+            )
+
         with self._lock:
             subscribers = list(self._subscribers)
 

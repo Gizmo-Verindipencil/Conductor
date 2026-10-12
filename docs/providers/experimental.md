@@ -139,19 +139,48 @@ The points that bear on this provider's experimental status:
   block, which is why `subscription` and `api_key` refuse a non-empty
   `setting_sources` at `conductor validate` and again at run time. `auto`
   keeps settings tiers available.
-- **Not billing attribution.** The readiness check shows that a credential path
-  is usable. It is not evidence of which account a model call was billed to.
+- **Readiness is not billing attribution; billing source is derived separately.**
+  The readiness check shows that a credential path is usable. On its own it is
+  not evidence of which account a model call was billed to. Conductor labels
+  each execution's billing source separately, from the environment the child
+  process actually received, the settings tiers it loads, and the probe fields,
+  and defaults to `unknown` whenever it cannot prove one. It reports
+  `subscription` only for a first-party login with a reported subscription
+  type, and `metered_api` only for an API key that reaches the child alone. It
+  reports `unknown` for an inherited cloud-backend selector (Bedrock, Vertex,
+  Foundry), a gateway token, a custom `ANTHROPIC_BASE_URL`, any settings tier,
+  both an API key and an OAuth token, an `apiKeySource` on a login, a
+  non-first-party `apiProvider`, or no subscription evidence (for example a
+  Console login). `apiProvider` is used only to exclude a non-first-party
+  backend; it never identifies how the CLI authenticated. Subscription usage
+  is shown as an **API-equivalent estimate**: token counts priced at API rates,
+  not an invoice or an additional charge. This detection relies on CLI-reported
+  `apiProvider` / `subscriptionType` evidence; a prior readiness-plus-inference
+  run observed a first-party subscription login and subscription billing
+  provenance, but that observation is provisional until it is revalidated, and
+  fake-key behavior, auto-mode or API-key precedence, fallback, wider
+  compatibility and broader environment coverage remain unvalidated; missing
+  or different evidence degrades safely to `unknown`. See
+  [Cost labels and billing source](../workflow-syntax.md#cost-labels-and-billing-source).
 - **Doctor scope.** `conductor doctor --check` builds the provider with its
   default configuration (`auth_mode: auto`) and does not read workflows, so it
   cannot report a workflow's explicit `auth_mode`; its output says so.
   `apiProvider` in that output names the API backend and is reported
   separately from `authMethod`.
 
-Tests never launch a real Claude CLI process. By default, a repository-wide
-autouse fixture in `tests/conftest.py` stubs the readiness check to ready.
-Tests marked `claude_auth_readiness_mocked` execute the real readiness method
-instead, but must mock process creation themselves — the fixture replaces
-process creation with a guard that fails the test if it is reached.
+Tests do not launch a real Claude CLI process, with one exception: the opt-in
+`tests/test_integration/test_claude_agent_sdk_subscription_real.py`. It is
+skipped in every default, CI and release run and proceeds only when **both**
+`-m real_api` and `CONDUCTOR_REAL_CLAUDE_SUBSCRIPTION=1` are supplied to the
+same command; once both are supplied, any unmet prerequisite fails rather than
+skips. Its readiness check legitimately runs `claude auth status --json`. See
+[Claude Subscription Billing Mode](./claude-subscription.md) for the runbook.
+
+By default, a repository-wide autouse fixture in `tests/conftest.py` stubs the
+readiness check to ready. Tests marked `claude_auth_readiness_mocked` execute
+the real readiness method instead, but must mock process creation themselves —
+the fixture replaces process creation with a guard that fails the test if it is
+reached.
 
 ## Native tools (`claude-agent-sdk`)
 
@@ -179,6 +208,56 @@ that bear on this provider's experimental status:
 - **Plugin subagents need `claude_code`.** With no built-in tools there is no
   dispatch tool to reach them, so they are refused rather than registered
   unreachable, at `conductor validate` and again at run time.
+
+## Interrupt and session timeout (`claude-agent-sdk`)
+
+Interrupt and `max_session_seconds` no longer wait for another message from
+the SDK before taking effect: both pre-empt the prompt being sent and a read
+that is already in flight.
+
+`max_session_seconds` is one absolute deadline measured from the start of the
+execution; messages arriving in between do not extend it. When an interrupt
+and an expired deadline are both pending, the interrupt wins and the agent
+returns its partial output. If either is already true before the session
+starts, no CLI is started at all.
+
+**A signal raised while the CLI is starting up is honoured once startup
+finishes.** Conductor never cancels the SDK's `connect()`: between spawning the
+process and building the object that can close it there is no supported way to
+reach a half-started CLI, so cancelling there could leave one running with no
+handle to stop it. A signal raised in that window is therefore delayed for
+however long startup actually takes — usually no time at all, since startup
+normally completes promptly. What is bounded is only one step of it: the SDK
+gives the CLI's `initialize` handshake a timeout of at least 60 seconds (more
+if `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` raises it). That is a ceiling on that one
+step, not a wait the SDK always performs, and the rest of startup — spawning
+the process, launching any MCP servers — adds to the total with no limit of its
+own. The overall delay is not bounded.
+
+**Conductor owns the shutdown of the SDK session.** It is never cancelled by an
+interrupt, an expired deadline or a caller that gave up, and it is retried once
+if the first attempt does not return. Shutdown completes before the temporary
+MCP configuration for that execution is removed. If shutdown cannot be
+confirmed after both attempts, the failure is logged; on a run that would
+otherwise have succeeded the result is discarded and a non-retryable
+`ProviderError` is raised instead, because reporting success while the CLI may
+still be running would be worse than failing.
+
+**No duration is bounded.** Returning after an interrupt or a timeout may take
+additional time while the SDK finishes releasing its resources, and neither
+Conductor nor the SDK places a global limit on that. Whether the underlying
+`claude` process has actually exited is not verified — the regressions covering
+this behaviour drive the real SDK against a fake transport, never a real
+process — so no claim is made about process termination beyond that.
+
+Two behaviour changes come with this. The response stream now ends at the
+first result message rather than at process exit, and stdin is closed during
+shutdown rather than immediately after that first result. Both follow from
+using the SDK's supported client API and neither has been exercised against a
+real CLI.
+
+Compatibility with the declared minimum `claude-agent-sdk>=0.2.82` was
+established from the v0.2.82 source; the tests run against the locked version.
 
 ## See also
 

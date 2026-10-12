@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from conductor import redaction
+from conductor.billing import BillingMode, aggregate_label
 from conductor.config.environment import ResolvedEnvironment, builtin_local_environment
 from conductor.config.schema import (
     AgentDef,
@@ -35,6 +37,7 @@ from conductor.config.schema import (
     WorkflowStepDef,
 )
 from conductor.duration import parse_duration
+from conductor.engine.bundle_prep import prepare_run_bundle
 from conductor.engine.checkpoint import CheckpointManager, CheckpointTrigger
 from conductor.engine.context import WorkflowContext
 from conductor.engine.execution_resolution import ExecutionResolver, ExecutionResolverSession
@@ -42,13 +45,15 @@ from conductor.engine.guidance import GuidanceChannel
 from conductor.engine.limits import LimitEnforcer
 from conductor.engine.pricing import ModelPricing
 from conductor.engine.router import Router, RouteResult
-from conductor.engine.run_manifest import executable_step_identity
+from conductor.engine.run_manifest import executable_step_identity, script_step_backends
+from conductor.engine.secrets import SecretValueCache
 from conductor.engine.usage import UsageTracker, WorkflowUsage
 from conductor.events import WorkflowEvent, WorkflowEventEmitter
 from conductor.exceptions import (
     AgentTimeoutError,
     BudgetExceededError,
     ConductorError,
+    ConfigurationError,
     ExecutionError,
     InterruptError,
     MaxIterationsError,
@@ -59,7 +64,7 @@ from conductor.exceptions import (
 from conductor.exceptions import (
     TimeoutError as ConductorTimeoutError,
 )
-from conductor.execution import RunnerBackend, RunOutcome, RunSpec, WorkspaceLease
+from conductor.execution import BundleRef, RunnerBackend, RunOutcome, RunSpec, WorkspaceLease
 from conductor.executor import questions as questions_mod
 from conductor.executor.agent import AgentExecutor
 from conductor.executor.linkify import linkify_markdown
@@ -92,6 +97,7 @@ from conductor.gates.interrupt import InterruptAction, InterruptHandler, Interru
 from conductor.mcp_auth import resolve_mcp_server_config
 from conductor.providers.base import AgentOutput, EventCallback
 from conductor.providers.capabilities import native_otel_spans_active
+from conductor.redaction import RunRedactor
 from conductor.telemetry import guards
 
 logger = logging.getLogger(__name__)
@@ -467,6 +473,16 @@ def _answer_counts(output: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _billing_mode_field(mode: BillingMode | None) -> dict[str, BillingMode]:
+    """Event fragment carrying one execution's billing provenance.
+
+    Empty when the provider stated none, so an absent key and ``None`` mean the same thing
+    and a legacy provider's events are unchanged. ``mode`` is the value the usage tracker
+    already coerced (``UsageTracker.record``), never a raw provider attribute.
+    """
+    return {"billing_mode": mode} if mode is not None else {}
+
+
 class WorkflowEngine:
     """Orchestrates multi-agent workflow execution.
 
@@ -511,6 +527,8 @@ class WorkflowEngine:
         _inherited_bg_mode: bool = False,
         execution_backend: RunnerBackend | None = None,
         execution_environment: ResolvedEnvironment | None = None,
+        secret_cache: SecretValueCache | None = None,
+        redactor: RunRedactor | None = None,
         _execution_session: ExecutionResolverSession | None = None,
         _workspace_lease: WorkspaceLease | None = None,
     ) -> None:
@@ -619,12 +637,16 @@ class WorkflowEngine:
             self._execution_session = ExecutionResolverSession(
                 builtin_local_environment(),
                 default_backend=execution_backend,
+                secret_cache=secret_cache,
+                redactor=redactor,
             )
             if _workspace_lease is not None:
                 self._execution_session.leases["local"] = _workspace_lease
         else:
             self._execution_session = ExecutionResolverSession(
-                execution_environment or builtin_local_environment()
+                execution_environment or builtin_local_environment(),
+                secret_cache=secret_cache,
+                redactor=redactor,
             )
 
         manifest_workflow_path = Path(workflow_path) if workflow_path is not None else None
@@ -809,6 +831,7 @@ class WorkflowEngine:
         # the nesting level.
         self._bg_mode = self._run_context.bg_mode or _inherited_bg_mode
         self._system_metadata: dict[str, Any] = {}
+        self._run_bundle: BundleRef | None = None
 
         # When True, ``_execute_loop`` skips its ``workflow_started`` emit.
         # Set by :meth:`suppress_workflow_started_emit` from the CLI resume
@@ -915,7 +938,14 @@ class WorkflowEngine:
             server_config["env"] = server_def.env
         if server_def.timeout:
             server_config["timeout"] = server_def.timeout
-        resolved = await resolve_mcp_server_config(server_name, server_config)
+        # DRIFT HAZARD: secret delivery must mirror cli/run.py::_build_mcp_servers
+        # (the provider connection path) — a declared binding must not connect
+        # here with env=None while it was resolved and audited.
+        resolved = await resolve_mcp_server_config(
+            server_name,
+            server_config,
+            secret_uses=self._execution_resolver.secret_uses,
+        )
 
         try:
             manager = MCPManager(tool_output=self.config.workflow.runtime.tool_output)
@@ -1222,6 +1252,7 @@ class WorkflowEngine:
 
         budget = result.budget_usd
         spent = result.spent_usd
+        billing_wire = summary.billing.to_wire()
 
         if result.should_emit:
             self._emit(
@@ -1231,12 +1262,17 @@ class WorkflowEngine:
                     "spent_usd": spent,
                     "budget_mode": self.limits.budget_mode,
                     "current_agent": self.limits.current_agent,
+                    **({"billing": billing_wire} if billing_wire is not None else {}),
                 },
             )
 
+        billing_label = aggregate_label(summary.billing, detailed=True)
+        billing_suffix = f" ({billing_label})" if billing_label else ""
+
         if self.limits.budget_mode == "enforce":
             raise BudgetExceededError(
-                f"Workflow exceeded cost budget (${budget:.2f}): spent ${spent:.2f}",
+                f"Workflow exceeded cost budget (${budget:.2f}): spent ${spent:.2f}"
+                f"{billing_suffix}",
                 budget_usd=budget,  # type: ignore[arg-type]  # non-None when exceeded
                 spent_usd=spent,
                 current_agent=self.limits.current_agent,
@@ -1244,10 +1280,11 @@ class WorkflowEngine:
 
         if result.should_emit:
             logger.warning(
-                "Budget exceeded (audit mode): spent $%.4f of $%.2f budget%s",
+                "Budget exceeded (audit mode): spent $%.4f of $%.2f budget%s%s",
                 spent,
                 budget,
                 f" at agent '{self.limits.current_agent}'" if self.limits.current_agent else "",
+                billing_suffix,
             )
 
     def _yaml_source_field(self) -> dict[str, str]:
@@ -1301,6 +1338,11 @@ class WorkflowEngine:
         }
         if self._execution_resolver.publish_manifest:
             system["execution_manifest"] = self._execution_resolver.manifest.model_dump(mode="json")
+            if self._run_bundle is not None:
+                system["bundle"] = {
+                    "digest": self._run_bundle.digest,
+                    "store_path": self._run_bundle.store_path,
+                }
 
         # Conditional fields — only when dashboard is active
         if self._dashboard_port is not None:
@@ -1837,8 +1879,35 @@ class WorkflowEngine:
                 executable_step_identity(agent.name, for_each_group=for_each_group)
             ].backend
         )
+        secret_env = self._execution_resolver.secret_env_for_step(
+            agent.name,
+            for_each_group=for_each_group,
+        )
+        collision = set(agent.env).intersection(secret_env)
+        if collision:
+            names = ", ".join(sorted(collision))
+            raise ConfigurationError(
+                f"Script step '{agent.name}' declares environment variable(s) {names} "
+                "in both 'env' and secret delivery.",
+                suggestion="Remove the duplicate from the step's 'env' mapping or choose a "
+                "different secret delivery name.",
+            )
         return await self.limits.wait_for_with_timeout(
-            self.script_executor.execute(agent, context, lease=lease, backend=backend),
+            self.script_executor.execute(
+                agent,
+                context,
+                lease=lease,
+                backend=backend,
+                secret_env=secret_env,
+                execution=self._execution_resolver.execution_spec_for_step(
+                    agent.name,
+                    for_each_group=for_each_group,
+                ),
+                inherit_control_environment=self._execution_resolver.inherit_env_for_step(
+                    agent.name,
+                    for_each_group=for_each_group,
+                ),
+            ),
             operation_name=f"script '{agent.name}'",
         )
 
@@ -2265,16 +2334,20 @@ class WorkflowEngine:
         path = self._mcp_diagnostic_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic = (
+                f"=== {_time.strftime('%Y-%m-%d %H:%M:%S')} step={agent_name!r} "
+                f"server={server!r} tool={tool!r} ===\n"
+            )
+            if exc is not None:
+                diagnostic += "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            elif detail is not None:
+                diagnostic += detail
+            diagnostic += "\n"
+            active_redactor = redaction.current()
+            if active_redactor is not None:
+                diagnostic = active_redactor.scrub(diagnostic)
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(
-                    f"=== {_time.strftime('%Y-%m-%d %H:%M:%S')} step={agent_name!r} "
-                    f"server={server!r} tool={tool!r} ===\n"
-                )
-                if exc is not None:
-                    fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
-                elif detail is not None:
-                    fh.write(detail)
-                fh.write("\n")
+                fh.write(diagnostic)
         except OSError as write_exc:
             logger.warning(
                 "Failed to write MCP step diagnostic for '%s': %s", agent_name, write_exc
@@ -3399,15 +3472,45 @@ class WorkflowEngine:
         # from cancellation. Defaults to "failed": anything reaching the
         # finally without setting it died on an unexpected path.
         outcome: RunOutcome = "failed"
+        redaction_token = None
         try:
+            backend_names = {
+                profile.backend for profile in self._execution_resolver.manifest.profiles.values()
+            }
+            await self._execution_session.ensure_backends(backend_names)
             if self._subworkflow_depth == 0:
+                if self._execution_session.owns_secrets:
+                    self._execution_session.reset_secrets()
+                    self._execution_resolver.refresh_secret_uses()
+                bundle = await prepare_run_bundle(
+                    self._execution_resolver.manifest,
+                    self.workflow_path,
+                    self._execution_session.environment,
+                )
+                self._run_bundle = bundle
+                backends = script_step_backends(self._execution_resolver.manifest)
+                if len(backends) > 1:
+                    message = "Workflow uses mixed script execution backends: " + ", ".join(
+                        sorted(backends)
+                    )
+                    logger.warning(message)
+                    from conductor.cli.run import verbose_log
+
+                    verbose_log(message, style="yellow")
                 await self._execution_session.prepare_leases(
                     RunSpec(
                         run_id=self._run_id,
                         workflow_name=self.config.workflow.name,
-                    )
+                        bundle=bundle,
+                    ),
+                    workflow_path=self.workflow_path,
                 )
                 self._workspace_lease = self._execution_session.lease_for_backend("local")
+                set_redactor = getattr(self._event_emitter, "set_redactor", None)
+                if set_redactor is not None:
+                    set_redactor(self._execution_session.redactor)
+                if redaction.current() is not self._execution_session.redactor:
+                    redaction_token = redaction.set_current(self._execution_session.redactor)
             result = await self._execute_loop(current_agent_name)
         except asyncio.CancelledError:
             outcome = "cancelled"
@@ -3432,8 +3535,12 @@ class WorkflowEngine:
                 self._warn_if_pricing_hook_silent()
             finally:
                 if self._subworkflow_depth == 0:
-                    await self._execution_session.finalize_leases(outcome)
-                    self._workspace_lease = None
+                    try:
+                        await self._execution_session.finalize_leases(outcome)
+                    finally:
+                        self._workspace_lease = None
+                        if redaction_token is not None:
+                            redaction.reset_current(redaction_token)
         # Successful completion: this run's periodic checkpoints are now stale.
         self._cleanup_run_periodic_checkpoints()
         return result
@@ -3471,15 +3578,45 @@ class WorkflowEngine:
         # execution backend identically, or resumed runs would silently skip
         # prepare/finalize (run/resume parity).
         outcome: RunOutcome = "failed"
+        redaction_token = None
         try:
+            backend_names = {
+                profile.backend for profile in self._execution_resolver.manifest.profiles.values()
+            }
+            await self._execution_session.ensure_backends(backend_names)
             if self._subworkflow_depth == 0:
+                if self._execution_session.owns_secrets:
+                    self._execution_session.reset_secrets()
+                    self._execution_resolver.refresh_secret_uses()
+                bundle = await prepare_run_bundle(
+                    self._execution_resolver.manifest,
+                    self.workflow_path,
+                    self._execution_session.environment,
+                )
+                self._run_bundle = bundle
+                backends = script_step_backends(self._execution_resolver.manifest)
+                if len(backends) > 1:
+                    message = "Workflow uses mixed script execution backends: " + ", ".join(
+                        sorted(backends)
+                    )
+                    logger.warning(message)
+                    from conductor.cli.run import verbose_log
+
+                    verbose_log(message, style="yellow")
                 await self._execution_session.prepare_leases(
                     RunSpec(
                         run_id=self._run_id,
                         workflow_name=self.config.workflow.name,
-                    )
+                        bundle=bundle,
+                    ),
+                    workflow_path=self.workflow_path,
                 )
                 self._workspace_lease = self._execution_session.lease_for_backend("local")
+                set_redactor = getattr(self._event_emitter, "set_redactor", None)
+                if set_redactor is not None:
+                    set_redactor(self._execution_session.redactor)
+                if redaction.current() is not self._execution_session.redactor:
+                    redaction_token = redaction.set_current(self._execution_session.redactor)
             result = await self._execute_loop(current_agent_name)
         except asyncio.CancelledError:
             outcome = "cancelled"
@@ -3499,8 +3636,12 @@ class WorkflowEngine:
                 self._warn_if_pricing_hook_silent()
             finally:
                 if self._subworkflow_depth == 0:
-                    await self._execution_session.finalize_leases(outcome)
-                    self._workspace_lease = None
+                    try:
+                        await self._execution_session.finalize_leases(outcome)
+                    finally:
+                        self._workspace_lease = None
+                        if redaction_token is not None:
+                            redaction.reset_current(redaction_token)
         # Successful completion: this run's periodic checkpoints are now stale.
         self._cleanup_run_periodic_checkpoints()
         return result
@@ -3630,6 +3771,7 @@ class WorkflowEngine:
             run_id=self._run_context.run_id,
             event_log_path=self._run_context.log_file,
             trigger=trigger,
+            redactor=self._execution_session.redactor,
         )
 
     def _save_checkpoint_on_failure(self, error: BaseException) -> None:
@@ -5115,10 +5257,12 @@ class WorkflowEngine:
         _v_elapsed = _time.time() - _v_start
 
         v_cost: float | None = None
+        v_billing_mode: BillingMode | None = None
         if outcome.output is not None:
             await self._ensure_pricing_resolved(agent, outcome.output.model)
             v_usage = self.usage_tracker.record(validator_row, outcome.output, _v_elapsed)
             v_cost = v_usage.cost_usd
+            v_billing_mode = v_usage.billing_mode
 
         out = outcome.output
         _emit_v(
@@ -5133,6 +5277,7 @@ class WorkflowEngine:
                 "output_tokens": out.output_tokens if out else None,
                 "cost_usd": v_cost,
                 "elapsed": _v_elapsed,
+                **_billing_mode_field(v_billing_mode),
             },
         )
 
@@ -6384,6 +6529,7 @@ class WorkflowEngine:
                                 "cost_usd": usage.cost_usd,
                                 "output": output.content,
                                 "output_keys": output_keys,
+                                **_billing_mode_field(usage.billing_mode),
                                 **await self._context_window_fields(resolved_agent, output),
                             },
                         )
@@ -7433,6 +7579,7 @@ class WorkflowEngine:
                         "input_tokens": output.input_tokens,
                         "output_tokens": output.output_tokens,
                         "cost_usd": usage.cost_usd,
+                        **_billing_mode_field(usage.billing_mode),
                         **await self._context_window_fields(resolved_agent, output),
                     },
                 )
@@ -7857,6 +8004,7 @@ class WorkflowEngine:
                         },
                     )
 
+                    child_billing = child_usage.billing.to_wire()
                     self._emit(
                         "for_each_item_completed",
                         {
@@ -7867,6 +8015,7 @@ class WorkflowEngine:
                             "tokens": child_usage.total_tokens,
                             "cost_usd": child_usage.total_cost_usd or 0.0,
                             "output": output_content,
+                            **({"billing": child_billing} if child_billing is not None else {}),
                         },
                     )
                     return (key, output_content)
@@ -8034,6 +8183,7 @@ class WorkflowEngine:
                         "tokens": output.tokens_used,
                         "cost_usd": usage.cost_usd,
                         "output": output.content,
+                        **_billing_mode_field(usage.billing_mode),
                     },
                 )
 
@@ -8525,6 +8675,8 @@ class WorkflowEngine:
             "live_pricing_degraded": self._pricing_hook_silent_warned,
             "unpriced_agent_count": len(usage.unpriced_agents),
             "unpriced_models": usage.unpriced_models,
+            # Always present; ``None`` when no execution stated its billing source.
+            "billing": usage.billing.to_wire(),
             "agents": [
                 {
                     "agent_name": a.agent_name,
@@ -8533,6 +8685,7 @@ class WorkflowEngine:
                     "output_tokens": a.output_tokens,
                     "cost_usd": a.cost_usd,
                     "elapsed_seconds": a.elapsed_seconds,
+                    **_billing_mode_field(a.billing_mode),
                 }
                 for a in usage.agents
             ],

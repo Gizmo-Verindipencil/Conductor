@@ -21,8 +21,128 @@ from typing import Any, Literal
 from conductor.engine.context import WorkflowContext
 from conductor.engine.limits import LimitEnforcer
 from conductor.exceptions import CheckpointError
+from conductor.redaction import RunRedactor
 
 logger = logging.getLogger(__name__)
+
+# Fixed protocol keys of the checkpoint payload: the envelope, the
+# ``failure`` / ``limits`` blocks, ``WorkflowContext.to_dict()``, the
+# ``system`` metadata mapping, and the ``execution_history`` entry shape.
+# Scrubbing must never rename these — a registered secret equal to one of
+# them would otherwise corrupt the schema (a secret named ``workflow``
+# rewriting ``workflow_path`` and making the checkpoint unloadable; a secret
+# named ``iteration`` deserializing counters and limits back to defaults).
+# Values under protocol keys are still scrubbed; user-controlled keys
+# (input names, agent-output field names) are scrubbed key and value, which
+# accepts that a user key exactly equal to a registered secret is renamed in
+# the on-disk copy while its value is always scrubbed.
+_CHECKPOINT_PROTOCOL_KEYS: frozenset[str] = frozenset(
+    {
+        # Envelope
+        "version",
+        "workflow_path",
+        "workflow_hash",
+        "created_at",
+        "trigger",
+        "failure",
+        "inputs",
+        "current_agent",
+        "context",
+        "limits",
+        "copilot_session_ids",
+        "copilot_session_cwds",
+        "system",
+        "instructions_preamble",
+        "run_id",
+        "event_log_path",
+        # ``failure`` block
+        "error_type",
+        "message",
+        "agent",
+        "iteration",
+        # ``WorkflowContext.to_dict()`` block
+        "workflow_inputs",
+        "agent_outputs",
+        "execution_history",
+        "user_guidance",
+        # ``LimitEnforcer.to_dict()`` block (``current_iteration`` is listed
+        # even though ``context.to_dict()`` also emits it: key scrubbing is
+        # substring-based, so a secret equal to a protocol key's substring —
+        # e.g. ``iteration`` inside ``current_iteration`` — renames any key
+        # not explicitly preserved)
+        "current_iteration",
+        "max_iterations",
+        # ``system`` metadata keys
+        "pid",
+        "platform",
+        "python_version",
+        "conductor_version",
+        "cwd",
+        "started_at",
+        "log_file",
+        "bg_mode",
+        "execution_manifest",
+        "dashboard_port",
+        "dashboard_url",
+        "parent_pid",
+        "bg_stderr_log",
+        "bg_stdout_log",
+        # ``execution_history`` entry
+        "agent_name",
+    }
+)
+
+
+# Paths whose ENTIRE key set is protocol- or provider-defined rather than
+# user content: inside them no key is ever renamed — only values are
+# scrubbed. ``system.execution_manifest`` pins the fixed
+# ``ResolvedRunManifest`` schema, including the dynamic profile identity
+# keys (executable step names) and the secret audit rows, so a registered
+# secret equal to one of its key names (``profile``, ``environment``,
+# ``ref``, ``scope``, ...) or to a step name must not corrupt the persisted
+# audit manifest. The session maps key provider session ids by agent name,
+# which resume reads back verbatim.
+_PRESERVE_ALL_KEYS_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("system", "execution_manifest"),
+        ("copilot_session_ids",),
+        ("copilot_session_cwds",),
+    }
+)
+
+
+def _scrub_checkpoint_payload(redactor: RunRedactor, payload: dict[str, Any]) -> dict[str, Any]:
+    """Scrub a checkpoint payload, preserving fixed protocol keys.
+
+    Values are scrubbed everywhere. Dictionary keys are scrubbed except when
+    the key names a checkpoint protocol field (``_CHECKPOINT_PROTOCOL_KEYS``)
+    or the key sits under a preserve-all path (``_PRESERVE_ALL_KEYS_PATHS``):
+    renaming those would break loading, silently reset restored counters and
+    limits, or corrupt the persisted audit manifest — even though the save
+    reported success.
+    """
+
+    def _walk(obj: Any, path: tuple[str, ...]) -> Any:
+        if isinstance(obj, (str, bytes)):
+            return redactor.scrub(obj)
+        if isinstance(obj, dict):
+            # The zone covers its whole subtree (audit rows arrive through
+            # lists, which pass the path through unchanged to their items).
+            preserve = any(path[: len(zone)] == zone for zone in _PRESERVE_ALL_KEYS_PATHS)
+            return {
+                (
+                    key if preserve or key in _CHECKPOINT_PROTOCOL_KEYS else redactor.scrub(key)
+                ): _walk(value, path + (key,) if isinstance(key, str) else path)
+                for key, value in obj.items()
+            }
+        if isinstance(obj, list):
+            return [_walk(item, path) for item in obj]
+        if isinstance(obj, tuple):
+            return tuple(_walk(item, path) for item in obj)
+        return obj
+
+    return _walk(payload, ())
+
 
 CheckpointTrigger = Literal["failure", "periodic"]
 """What caused a checkpoint to be written.
@@ -192,6 +312,8 @@ class CheckpointManager:
         run_id: str = "",
         event_log_path: str = "",
         trigger: CheckpointTrigger = "failure",
+        *,
+        redactor: RunRedactor | None = None,
     ) -> Path | None:
         """Serialize workflow state to a checkpoint file.
 
@@ -230,6 +352,15 @@ class CheckpointManager:
                 ``"periodic"`` (milestone/time-based save at a step boundary).
                 Persisted under the top-level ``"trigger"`` key and used by
                 ``conductor checkpoint list`` and rotation.
+            redactor: Optional run-scoped secret redactor. When provided and
+                :attr:`RunRedactor.active`, the assembled checkpoint payload
+                (``inputs``, ``context``, ``failure.message``, ``system``,
+                ``instructions_preamble``, and every other serialized value)
+                is scrubbed as a *copy* before serialization, so registered
+                secret values never reach the file. The live ``WorkflowContext``
+                and the caller's ``inputs`` mapping are never mutated. When
+                ``None`` or inactive, output is byte-identical to an
+                unredacted save.
 
         Returns:
             Path to the saved checkpoint file, or ``None`` if saving failed.
@@ -277,6 +408,14 @@ class CheckpointManager:
                 "run_id": run_id,
                 "event_log_path": event_log_path,
             }
+
+            # Scrub registered secrets from the payload as a copy before
+            # serialization — fixed protocol keys keep their names (only
+            # string values inside are replaced) and the live engine context
+            # is never mutated. Zero work when no redactor is set or none
+            # are registered, preserving byte parity with unredacted saves.
+            if redactor is not None and redactor.active:
+                checkpoint = _scrub_checkpoint_payload(redactor, checkpoint)
 
             # Serialize to JSON
             json_data = json.dumps(checkpoint, indent=2)

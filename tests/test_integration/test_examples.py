@@ -382,6 +382,7 @@ class TestClaudeAgentSdkExamplesNativeTools:
         # Prompt-only.
         "test-claude-agent-sdk.yaml": ("none", {"answerer": "none"}),
         "experimental-claude-agent-sdk.yaml": ("none", {"analyze": "none", "summarize": "none"}),
+        "claude-agent-sdk-subscription.yaml": ("none", {"answerer": "none"}),
     }
 
     _POLICIES: dict[str, tuple[Any, str]] = {

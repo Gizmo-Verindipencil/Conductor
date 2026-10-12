@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from conductor.engine.guidance import validate_guidance_text
 from conductor.events import WorkflowEvent, WorkflowEventEmitter
 from conductor.executor.linkify import LINKABLE_EXTENSIONS
+from conductor.redaction import RunRedactor
 from conductor.web.auth import (
     OriginHostGuard,
     constant_time_match,
@@ -149,6 +150,13 @@ class WebDashboard:
         # set_guidance_sink once the engine exists; POST /api/guidance calls
         # it directly rather than being polled, mirroring set_interrupt_event.
         self._guidance_sink: Callable[[str], int] | None = None
+
+        # Run-scoped secret redactor (secrets contract). Replay seeding
+        # appends straight to ``_event_history``, bypassing the emitter's
+        # scrub, so the replay methods pass each payload through this when
+        # active. Live events need nothing here — the emitter scrubs them
+        # upstream before ``_on_event`` ever sees them.
+        self._redactor: RunRedactor | None = None
 
         # Pre-sink latch — guidance submitted during the startup window
         # before set_guidance_sink is called (mirrors _pending_stop). Drained
@@ -801,7 +809,7 @@ class WebDashboard:
                     continue
                 if event_type in self._REPLAY_ROOT_SKIP_TYPES and self._is_root_event(event_dict):
                     continue
-            self._event_history.append(event_dict)
+            self._event_history.append(self._scrub_replay_event(event_dict))
             count += 1
 
         logger.info("Replayed %d events from %s", count, path)
@@ -865,7 +873,11 @@ class WebDashboard:
 
             for event_type, event_data in events:
                 self._event_history.append(
-                    {"type": event_type, "timestamp": ts, "data": event_data}
+                    {
+                        "type": event_type,
+                        "timestamp": ts,
+                        "data": self._scrub_replay_payload(event_data),
+                    }
                 )
             count += len(events)
 
@@ -1762,3 +1774,50 @@ class WebDashboard:
             pending_texts, self._pending_guidance = self._pending_guidance, []
             for text in pending_texts:
                 sink(text)
+
+    def set_redactor(self, redactor: RunRedactor | None) -> None:
+        """Attach the run-scoped secret redactor used for replay seeding.
+
+        Called by ``resume_workflow_async`` before any replay so payloads
+        read from the prior run's JSONL log (or synthesised from the restored
+        context, whose ``agent_outputs`` can carry declared secret values)
+        are scrubbed before they land in ``_event_history``. Identity
+        passthrough when the redactor is inactive, so a secret-less resume
+        stays byte-identical.
+
+        Args:
+            redactor: The run's redactor, or None to detach.
+        """
+        self._redactor = redactor
+
+    def _scrub_replay_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Scrub one payload dict through the attached redactor.
+
+        Returns the payload unchanged — zero copies — when no redactor is
+        attached or it is inactive; otherwise a sanitized copy. The caller's
+        dict is never mutated, and the on-disk JSONL log is never rewritten
+        (historical pre-upgrade logs stay as they are).
+        """
+        redactor = self._redactor
+        if redactor is None or not redactor.active:
+            return payload
+        scrubbed = redactor.scrub(payload)
+        return scrubbed if isinstance(scrubbed, dict) else payload
+
+    def _scrub_replay_event(self, event_dict: dict[str, Any]) -> dict[str, Any]:
+        """Scrub one replayed event envelope, preserving its protocol fields.
+
+        Only the ``data`` payload is scrubbed — the envelope's ``type`` and
+        ``timestamp`` are protocol fields and survive verbatim, exactly as
+        live emission preserves them (a registered secret equal to part of an
+        event type, e.g. ``completed``, must not rewrite ``agent_completed``
+        into an undispatchable ``agent_***redacted***``). Identity
+        passthrough when no redactor is attached or inactive.
+        """
+        redactor = self._redactor
+        if redactor is None or not redactor.active:
+            return event_dict
+        data = event_dict.get("data")
+        if not isinstance(data, dict):
+            return event_dict
+        return {**event_dict, "data": redactor.scrub_event_data(data)}

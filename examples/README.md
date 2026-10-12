@@ -109,6 +109,62 @@ conductor validate examples/execution-profiles.yaml --environment demo
 conductor run examples/execution-profiles.yaml --environment demo
 ```
 
+### docker-script.yaml
+
+Demonstrates containerized script step execution on the Docker runner backend. Demonstrates:
+- Executing script steps inside short-lived containers
+- Sharing workspace state across steps via the run-scoped `/workspace` volume
+- Accessing staged bundle closure files under `/workspace/main/`
+- Resolving Docker execution profile settings from `examples/.conductor/environments/docker-demo.yaml`
+
+```bash
+# Validate against the docker-demo environment
+conductor validate examples/docker-script.yaml --environment docker-demo
+
+# Run the workflow inside Docker containers (requires Docker daemon)
+conductor run examples/docker-script.yaml --environment docker-demo
+```
+
+## Run Bundles
+
+### run-bundle.yaml
+
+Demonstrates content-addressed run bundle packaging for workflow dependencies. Demonstrates:
+- Declaring static asset files under `workflow.bundle.assets`
+- External file inclusions via `!file`
+- Inspecting the offline bundle closure with `conductor validate --environment demo`
+- Building and storing the content-addressed bundle with `conductor bundle build --environment demo`
+- Provider-free execution with set and script steps
+
+```bash
+# Build the run bundle
+conductor bundle build examples/run-bundle.yaml --environment demo
+
+# Validate and view the bundle closure report
+conductor validate examples/run-bundle.yaml --environment demo
+
+# Run the workflow
+conductor run examples/run-bundle.yaml --environment demo
+```
+
+## Secret Bindings
+
+### secret-bindings.yaml
+
+Demonstrates declarative secret bindings delivered to a script step. Demonstrates:
+- Requesting a logical secret reference on a step via `execution.secrets`
+- Mapping the logical secret to a host environment variable in an execution environment document (`examples/.conductor/environments/secrets-demo.yaml`)
+- Delivering the secret into the subprocess environment safely
+- Verifying secret delivery in a provider-free script step without exposing the secret value
+
+```bash
+# Validate against the secrets-demo environment
+conductor validate examples/secret-bindings.yaml --environment secrets-demo
+
+# Run with the secrets-demo environment (requires DEMO_SECRET)
+DEMO_SECRET="my-secret-token" conductor run examples/secret-bindings.yaml --environment secrets-demo
+```
+
 ## Human-in-the-Loop Examples
 
 ### design-review.yaml

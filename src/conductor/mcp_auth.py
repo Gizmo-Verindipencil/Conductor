@@ -11,9 +11,15 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.request
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
+
+from conductor.exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from conductor.engine.secrets import SecretUseIndex
 
 
 async def discover_oauth_requirements(url: str) -> dict[str, Any] | None:
@@ -152,7 +158,7 @@ async def resolve_mcp_server_auth(
 
     # Skip if Authorization header already provided
     headers = server_config.get("headers", {})
-    if "Authorization" in headers or "authorization" in headers:
+    if any(header.casefold() == "authorization" for header in headers):
         return server_config
 
     url = server_config.get("url")
@@ -170,8 +176,9 @@ async def resolve_mcp_server_auth(
     return server_config
 
 
-# Pattern for resolving ${VAR} and ${VAR:-default} in MCP env values.
-_ENV_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+# Pattern for resolving ${VAR} and ${VAR:-default} in MCP env values. Kept in
+# step with conductor.config.loader.ENV_VAR_PATTERN: "${{ expr }}" is not a var.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^{}:]+)(?::-([^}]*))?\}")
 
 
 def resolve_mcp_env_vars(env: dict[str, str]) -> dict[str, str]:
@@ -217,7 +224,28 @@ def resolve_mcp_env_vars(env: dict[str, str]) -> dict[str, str]:
     return resolved
 
 
-async def resolve_mcp_server_config(name: str, server_config: dict[str, Any]) -> dict[str, Any]:
+def _delivery_collision(
+    *,
+    server_name: str,
+    delivery_kind: str,
+    delivery_name: str,
+    secret_ref: str,
+    existing_side: str,
+) -> ConfigurationError:
+    namespace = "environment variable" if delivery_kind == "env" else "HTTP header"
+    return ConfigurationError(
+        f"Secret binding '{secret_ref}' delivery {namespace} '{delivery_name}' for MCP server "
+        f"'{server_name}' collides with {existing_side}.",
+        suggestion=f"Use a unique {namespace} name for each literal and secret binding delivery.",
+    )
+
+
+async def resolve_mcp_server_config(
+    name: str,
+    server_config: dict[str, Any],
+    *,
+    secret_uses: SecretUseIndex | None = None,
+) -> dict[str, Any]:
     """Apply Conductor's full resolution pipeline to one MCP server config.
 
     The single place both server sources agree on. A workflow-declared
@@ -232,6 +260,9 @@ async def resolve_mcp_server_config(name: str, server_config: dict[str, Any]) ->
         name: Server name, used for OAuth token cache keying and messages.
         server_config: Resolved-shape config dict (``type`` plus the
             transport's own fields).
+        secret_uses: Optional root-config secret-use index. Declared values
+            are read from its cache-backed API only at delivery time; the
+            index itself never stores plaintext.
 
     Returns:
         A new dict with ``env`` placeholders expanded and, for http/sse,
@@ -242,6 +273,74 @@ async def resolve_mcp_server_config(name: str, server_config: dict[str, Any]) ->
     env = resolved.get("env")
     if isinstance(env, dict) and env:
         resolved["env"] = resolve_mcp_env_vars(env)
+
+    if secret_uses is not None:
+        literal_env = resolved.get("env")
+        env_values: dict[str, str] = dict(literal_env) if isinstance(literal_env, dict) else {}
+        literal_env_keys = {
+            (key.casefold() if sys.platform == "win32" else key): key for key in env_values
+        }
+        binding_env: dict[str, str] = {}
+
+        literal_headers = resolved.get("headers")
+        header_values: dict[str, str] = (
+            dict(literal_headers) if isinstance(literal_headers, dict) else {}
+        )
+        literal_header_keys = {key.casefold(): key for key in header_values}
+        binding_headers: dict[str, str] = {}
+
+        for use in secret_uses.deliveries_for_server(name):
+            delivery_name = use.delivery_name
+            if use.delivery_kind == "env":
+                key = delivery_name.casefold() if sys.platform == "win32" else delivery_name
+                if key in literal_env_keys:
+                    raise _delivery_collision(
+                        server_name=name,
+                        delivery_kind="env",
+                        delivery_name=delivery_name,
+                        secret_ref=use.ref,
+                        existing_side=(f"literal environment variable '{literal_env_keys[key]}'"),
+                    )
+                if key in binding_env:
+                    raise _delivery_collision(
+                        server_name=name,
+                        delivery_kind="env",
+                        delivery_name=delivery_name,
+                        secret_ref=use.ref,
+                        existing_side=(
+                            f"secret binding '{binding_env[key]}' delivery environment variable "
+                            f"'{delivery_name}'"
+                        ),
+                    )
+                binding_env[key] = use.ref
+                env_values[delivery_name] = secret_uses.value_for(use.ref)
+                resolved["env"] = env_values
+                continue
+
+            key = delivery_name.casefold()
+            if key in literal_header_keys:
+                raise _delivery_collision(
+                    server_name=name,
+                    delivery_kind="header",
+                    delivery_name=delivery_name,
+                    secret_ref=use.ref,
+                    existing_side=f"literal HTTP header '{literal_header_keys[key]}'",
+                )
+            if key in binding_headers:
+                raise _delivery_collision(
+                    server_name=name,
+                    delivery_kind="header",
+                    delivery_name=delivery_name,
+                    secret_ref=use.ref,
+                    existing_side=(
+                        f"secret binding '{binding_headers[key]}' delivery HTTP header "
+                        f"'{delivery_name}'"
+                    ),
+                )
+            binding_headers[key] = use.ref
+            header_values[delivery_name] = secret_uses.value_for(use.ref)
+            resolved["headers"] = header_values
+
     return await resolve_mcp_server_auth(name, resolved)
 
 

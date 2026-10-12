@@ -16,6 +16,7 @@ Complete command-line reference for Conductor.
 - [`conductor guide`](#conductor-guide)
 - [`conductor checkpoint list`](#conductor-checkpoint-list)
 - [`conductor validate`](#conductor-validate)
+- [`conductor bundle build`](#conductor-bundle-build)
 - [`conductor doctor`](#conductor-doctor)
 - [`conductor registry`](#conductor-registry)
 - [`conductor mcp serve`](#conductor-mcp-serve)
@@ -395,6 +396,7 @@ The dashboard URL is included because there is otherwise no supported way to rec
       "duration_seconds": 300.0,
       "total_tokens": 1234,
       "total_cost_usd": 0.05,
+      "billing": {"state": "subscription", "breakdown": {"subscription": 2}},
       "error_type": null,
       "error_message": null,
       "event_log": "/tmp/conductor/conductor-other-workflow-20260303-120000-b2c3d4e5.events.jsonl"
@@ -402,6 +404,14 @@ The dashboard URL is included because there is otherwise no supported way to rec
   ]
 }
 ```
+
+`billing` describes the executions behind `total_cost_usd`: `state` is one of
+`metered_api`, `subscription`, `unknown` or `mixed`, and `breakdown` counts
+executions per source (`subscription`, `metered_api`, `unknown`, and `unstated`
+for a provider that reports nothing). It is `null` when no execution stated a
+billing source (older records, providers that report nothing). In the table
+view the cost cell carries the label, for example `~$0.05 (API-equivalent
+estimate)`; a cost is an estimate from token counts, not an invoice.
 
 `run_id` is the join key to the run's events JSONL
 (`conductor-<name>-<ts>-<run_id>.events.jsonl` under `$TMPDIR/conductor/`);
@@ -979,6 +989,16 @@ When validating workflow profile references, Conductor applies a three-level che
 | **Bare validate** (`conductor validate workflow.yaml`) | One or more present | Discovers available environment documents (`.conductor/environments/` project walk and user level).<br>• If refs resolve in all discovered environments: silence.<br>• If refs resolve in some but not all: warning naming environments where the profile is missing.<br>• If refs do not resolve in any discovered environment: validation error.<br>• If no environments are found: warning to run `conductor validate --environment <name>` for the full cross-check.<br>• If a discovered file is malformed: warning naming the file and treating it as not resolving. |
 | **Explicit validate** (`conductor validate workflow.yaml --environment <name\|PATH>`) | Any | Skips ambient discovery. Loads the specified environment document (fatal error if unreadable or invalid), compiles the full run manifest, and prints the **Execution Resolution** report (environment name, source, path, default profile, step-to-profile-to-backend table, and audit classification). |
 
+### Secret Reference Validation Levels
+
+When validating workflow secret references (`execution.secrets` or MCP server `secrets`), Conductor applies a similar multi-level check:
+
+| Mode | Workflow Secret Refs | Behavior |
+|------|----------------------|----------|
+| **Bare validate** (`conductor validate workflow.yaml`) | None present | **Lazy gate:** No environment discovery or secret validation is performed. Validation proceeds silently. |
+| **Bare validate** (`conductor validate workflow.yaml`) | One or more present | Performs structural checks (scope placement, delivery transport, delivery name collisions). Discovers available environment documents.<br>• If refs resolve in all discovered environments: silence.<br>• If refs resolve in some but not all: warning naming environments where the secret is missing.<br>• If refs do not resolve in any discovered environment: validation error.<br>• If no authored environments are found: warning to run `conductor validate --environment <name>`. (The built-in `local/default` environment never counts as authored). |
+| **Explicit validate** (`conductor validate workflow.yaml --environment <name\|PATH>`) | Any | Loads the specified environment document, compiles the full run manifest with secret uses, validates `allow` policies against consumers (errors if consumer scope is not permitted), and warns if any declared source variable is unset on the local machine. When secret references are present, prints the **Secret Bindings** report (bindings table with names, source kinds, allow lists, and consumers table with consumer step, ref, scope, and delivery). |
+
 ### Validation Checks
 
 **Errors** (validation fails):
@@ -992,9 +1012,94 @@ When validating workflow profile references, Conductor applies a three-level che
 - **Stale agent references in templates** — `{{ old_agent.output.field }}` where `old_agent` doesn't exist
 - **Missing workflow input references** — `{{ workflow.input.x }}` where `x` isn't declared in `input:`
 - Stale references checked across `prompt`, `system_prompt`, `command`, `args`, `working_dir`, `input_mapping`, parallel-group inputs, and workflow `output:` templates
+- **Invalid secret scopes or positions** — using `scope: agent` (reserved), using non-script scope on script steps, or non-MCP scope on MCP servers
+- **Invalid secret delivery transports** — header delivery on script steps or stdio MCP servers
+- **Secret delivery name collisions** — colliding literal and secret environment variables or HTTP headers within the same consumer
+- **Secret allow list violations** — consumer scope disallowed by the binding's `allow` policy under `--environment`
+- **Non-script step resolving to Docker backend** — assigning a Docker execution profile to an LLM agent, MCP step, or sub-workflow step (reserved until step 7)
 
 **Warnings** (validation passes with notes):
 - **Undeclared dependencies in explicit mode** — agent prompt references `{{ a.output.val }}` but doesn't declare `a.output` in its `input:` list
+- **Unset secret sources** — secret binding source environment variable is unset on the current validation machine when running with `--environment`
+- **Ambiguous or missing ambient secret bindings** — secret references not present in all discovered environment documents during bare validation
+- **Mixed script backends** — environment resolves script steps to both local and Docker backends
+- **Incompatible Docker user staging** — environment uses multiple Docker profiles with different explicit user settings on a shared volume
+- **Inherited environment on Docker profile** — Docker profile sets `inherit_control_environment: true`
+- **Read-only Docker profile without tmpfs** — Docker profile sets `read_only: true` with `tmpfs: false`
+- **Host network mode on Docker profile** — Docker profile sets `network: host`
+
+### Docker Profile Report Section
+
+When validating against an environment document that defines profiles using `backend: docker`, `conductor validate --environment <name|PATH>` prints a dedicated **Docker Profile** detail section for each configured Docker profile:
+
+* **Image reference**: The configured container image tag or digest.
+* **Platform, Network, User**: Displays the configured string or `Docker default` when omitted.
+* **Hardening and Init flags**: Displays `true` or `false` for `Init`, `Read-only`, `Cap-drop-all`, and `No-new-privileges`.
+* **Tmpfs mount**: Displays `false`, `true`, or the configured size string (such as `512m` or `1g`).
+* **Resource bounds**: Displays the configured limits for `CPU`, `Memory`, and `PIDs`, or `—` when unset.
+* **Informational digest recommendation**: When the image is specified by tag without a `@sha256:` digest, prints an informational note recommending digest pinning for reproducible CI runs.
+
+Validation runs completely offline and never contacts the Docker daemon, network, or image registries.
+
+### Bundle Closure Report
+
+When `--environment` is passed, `conductor validate` computes the workflow's complete offline file closure and prints the **Bundle Closure** report.
+
+* **Complete Closure:** If all dependencies are available locally, validation prints the `bundle_digest`, total uncompressed file size, an entry count breakdown by origin kind (`workflow`, `include`, `jinja_include`, `subworkflow`, `subworkflow_registry`, `skill`, `plugin`, `asset`), authorized roots, and git repository dirty status.
+* **Incomplete Closure (Offline Plugin Misses):** `conductor validate` never uses the network. If a remote plugin source declared in `runtime.plugin_sources` is not cached locally under `$CONDUCTOR_HOME/cache/plugins/`, validation succeeds with an `incomplete` status note, reports missing cache identities, and omits the digest.
+* **Bundle Validation Errors:** Local file defects fail validation with exit code 1. These include dynamic Jinja includes (`BundleDynamicTemplateError`), root escapes (`BundleRootEscapeError`, `BundleSymlinkEscapeError`), resource limit violations (`BundleCapsError`), missing declared roots, or circular dependencies.
+
+## `conductor bundle build`
+
+Build an immutable, content-addressed run bundle for a workflow.
+
+Collects the complete statically knowable file closure of the workflow, including external file references (`!file`, `!yamlfile`), Jinja2 template partials, local and registry sub-workflows, skills, plugins, and declared assets. Publishes the resulting tree and deterministic archive to the content-addressed store at `$CONDUCTOR_HOME/cache/bundles/sha256-<hex>/`. The report and manifest retain the canonical `sha256:<hex>` digest spelling; only the directory name uses a hyphen for Windows portability.
+
+```bash
+conductor bundle build <workflow.yaml | registry-ref> [OPTIONS]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `workflow` | Path to a local workflow YAML file or a workflow registry reference (`name`, `name@registry`, `name@registry#ref`). |
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--environment <name\|PATH>` | Execution environment: a name resolved via `.conductor/environments/` (project then user level) or a path to an environment document. Defaults to the built-in local environment. |
+
+### Exit Codes
+
+* `0`: Bundle built successfully (or existing cached bundle reused) and content published to the store.
+* `1`: Build failed due to schema errors, dynamic includes, root escapes, missing dependencies, or exceeded limits.
+
+### Examples
+
+```bash
+# Build a bundle for a local workflow file
+conductor bundle build workflow.yaml
+
+# Build with a specific execution environment
+conductor bundle build workflow.yaml --environment demo
+
+# Build directly from a workflow registry reference
+conductor bundle build 'qa-bot@official#v1.2.3'
+```
+
+### Store Layout
+
+Bundles are stored under `$CONDUCTOR_HOME/cache/bundles/sha256-<hex>/`:
+
+* `bundle.json`: The serialized `BundleManifest` (readiness sentinel, written last).
+* `bundle.tar.gz`: The reproducible gzip archive containing all files and `.bundle/manifest.json`.
+* `tree/`: The staged directory hierarchy with POSIX-normalized paths (`tree/main/`, `tree/roots/`, etc.).
+
+### CI Priming
+
+`conductor bundle build` serves as the CI priming step for workflow dependencies. Unlike `conductor validate` (which runs offline), `conductor bundle build` fetches and caches any remote plugin sources declared in `runtime.plugin_sources`. After running `conductor bundle build` during a CI preparation stage, subsequent workflow runs and validations can execute in isolated, offline environments.
 
 ## `conductor doctor`
 
